@@ -454,7 +454,23 @@ struct SearchView: View {
                     LazyVStack(spacing: SeeleSpacing.dividerSpacing) {
                         if searchState.isGrouped {
                             ForEach(searchState.displayItems) { item in
-                                SearchResultListItemView(item: item)
+                                SearchResultListItemView(
+                                    item: item,
+                                    isSelectionMode: searchState.isSelectionMode,
+                                    isSelected: {
+                                        if case .loose(let result) = item { return searchState.selectedResults.contains(result.id) }
+                                        if case .child(let result) = item { return searchState.selectedResults.contains(result.id) }
+                                        return false
+                                    }(),
+                                    onToggleSelection: {
+                                        switch item {
+                                        case .loose(let result), .child(let result):
+                                            searchState.toggleSelection(result.id)
+                                        default:
+                                            break
+                                        }
+                                    }
+                                )
                             }
                         } else {
                             ForEach(searchState.filteredResults) { result in

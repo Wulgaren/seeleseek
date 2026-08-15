@@ -800,10 +800,9 @@ public final class ServerMessageHandler {
             return
         }
 
-        // Search our shared files. The search itself hops off the main
-        // actor (see ShareManager.search), so the remaining work after
-        // the scan can stay on whatever actor this handler already runs
-        // on — we just need a Task boundary to await the async call.
+        // Search our shared files. ShareManager.search snapshots the index
+        // and matches off the main actor; we only hop back for logging /
+        // sending the reply.
         guard let client else {
             logger.debug("No client available for distributed search")
             return

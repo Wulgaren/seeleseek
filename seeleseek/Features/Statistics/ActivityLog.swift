@@ -18,6 +18,22 @@ final class ActivityLog: ActivityLogging {
     private var flushTask: Task<Void, Never>?
     private static let flushInterval: Duration = .milliseconds(250)
 
+    /// Peer connect/disconnect storms (dozens per second after login/search)
+    /// are coalesced into one summary line so the console and its observers
+    /// are not woken per peer.
+    private var pendingPeerConnects = 0
+    private var pendingPeerDisconnects = 0
+    private var peerBatchTask: Task<Void, Never>?
+    private static let peerBatchInterval: Duration = .seconds(3)
+
+    /// Distributed-search hits (we answered someone else's query) arrive in
+    /// a steady drip on a busy relay. Batch into one summary line so the
+    /// console is not woken per match — same idea as peer batching.
+    private var pendingDistributedSearches = 0
+    private var pendingDistributedMatches = 0
+    private var distributedBatchTask: Task<Void, Never>?
+    private static let distributedBatchInterval: Duration = .seconds(3)
+
     private let maxEvents = 500
 
     struct ActivityEvent: Identifiable {
@@ -41,6 +57,8 @@ final class ActivityLog: ActivityLogging {
         case chatMessage
         case error
         case info
+        /// Main-thread frame hitch (scroll jank diagnostics).
+        case scrollHitch
 
         var icon: String {
             switch self {
@@ -55,6 +73,7 @@ final class ActivityLog: ActivityLogging {
             case .chatMessage: "bubble.left.fill"
             case .error: "exclamationmark.triangle.fill"
             case .info: "info.circle.fill"
+            case .scrollHitch: "gauge.with.dots.needle.67percent"
             }
         }
 
@@ -73,6 +92,7 @@ final class ActivityLog: ActivityLogging {
             case .chatMessage: "Chat message"
             case .error: "Error"
             case .info: "Info"
+            case .scrollHitch: "Scroll hitch"
             }
         }
 
@@ -88,7 +108,7 @@ final class ActivityLog: ActivityLogging {
                 return SeeleColors.accent
             case .chatMessage:
                 return SeeleColors.warning
-            case .error:
+            case .error, .scrollHitch:
                 return SeeleColors.error
             case .info:
                 return SeeleColors.textSecondary
@@ -118,10 +138,47 @@ final class ActivityLog: ActivityLogging {
 
     func clear() {
         pendingEvents.removeAll(keepingCapacity: true)
+        pendingPeerConnects = 0
+        pendingPeerDisconnects = 0
+        peerBatchTask?.cancel()
+        peerBatchTask = nil
+        pendingDistributedSearches = 0
+        pendingDistributedMatches = 0
+        distributedBatchTask?.cancel()
+        distributedBatchTask = nil
         events.removeAll()
         flushTask?.cancel()
         flushTask = nil
     }
+
+    /// Frame hitch for scroll-lag diagnostics. `detail` carries suspect
+    /// context (tab, list sizes, transfer activity). Coalesced by
+    /// `ScrollHitchMonitor` before it reaches here.
+    func logScrollHitch(durationMs: Int, detail: String) {
+        log(.scrollHitch, title: "Scroll hitch \(durationMs)ms", detail: detail)
+    }
+
+    /// Newest-last text dump of the full console (activity + hitches).
+    /// Flushes any pending batch first so Copy all is complete.
+    func copyableDump() -> String {
+        flushPeerBatch()
+        flushDistributedBatch()
+        flush()
+        let formatter = Self.dumpTimeFormatter
+        return events.reversed().map { event in
+            var line = "[\(formatter.string(from: event.timestamp))] \(event.type.spokenName): \(event.title)"
+            if let detail = event.detail, !detail.isEmpty {
+                line += " — \(detail)"
+            }
+            return line
+        }.joined(separator: "\n")
+    }
+
+    private static let dumpTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
 
     /// Start a deferred flush of `pendingEvents` into `events`. Subsequent
     /// log calls during the flush window are absorbed into the same batch.
@@ -164,11 +221,45 @@ final class ActivityLog: ActivityLogging {
     // MARK: - Convenience Methods
 
     func logPeerConnected(username: String, ip: String) {
-        log(.peerConnected, title: "Connected to \(username)", detail: ip, username: username)
+        pendingPeerConnects += 1
+        schedulePeerBatchFlush()
     }
 
     func logPeerDisconnected(username: String) {
-        log(.peerDisconnected, title: "Disconnected from \(username)", username: username)
+        pendingPeerDisconnects += 1
+        schedulePeerBatchFlush()
+    }
+
+    private func schedulePeerBatchFlush() {
+        guard peerBatchTask == nil else { return }
+        peerBatchTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.peerBatchInterval)
+            guard !Task.isCancelled, let self else { return }
+            self.flushPeerBatch()
+        }
+    }
+
+    private func flushPeerBatch() {
+        peerBatchTask = nil
+        let connected = pendingPeerConnects
+        let disconnected = pendingPeerDisconnects
+        pendingPeerConnects = 0
+        pendingPeerDisconnects = 0
+        guard connected > 0 || disconnected > 0 else { return }
+
+        var parts: [String] = []
+        if connected > 0 {
+            parts.append("+\(connected) connected")
+        }
+        if disconnected > 0 {
+            parts.append("−\(disconnected) disconnected")
+        }
+        let title = "Peers: \(parts.joined(separator: ", "))"
+        let type: EventType =
+            disconnected == 0 ? .peerConnected
+            : connected == 0 ? .peerDisconnected
+            : .info
+        log(type, title: title)
     }
 
     func logSearchStarted(query: String) {
@@ -268,6 +359,34 @@ final class ActivityLog: ActivityLogging {
     }
 
     func logDistributedSearch(query: String, matchCount: Int) {
-        log(.searchResult, title: "\(matchCount) shared for \"\(query)\"")
+        pendingDistributedSearches += 1
+        pendingDistributedMatches += matchCount
+        scheduleDistributedBatchFlush()
+    }
+
+    private func scheduleDistributedBatchFlush() {
+        guard distributedBatchTask == nil else { return }
+        distributedBatchTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.distributedBatchInterval)
+            guard !Task.isCancelled, let self else { return }
+            self.flushDistributedBatch()
+        }
+    }
+
+    private func flushDistributedBatch() {
+        distributedBatchTask = nil
+        let searches = pendingDistributedSearches
+        let matches = pendingDistributedMatches
+        pendingDistributedSearches = 0
+        pendingDistributedMatches = 0
+        guard searches > 0 else { return }
+
+        let title: String
+        if searches == 1 {
+            title = "Shared \(matches) match\(matches == 1 ? "" : "es") across 1 search"
+        } else {
+            title = "Shared \(matches) matches across \(searches) searches"
+        }
+        log(.searchResult, title: title)
     }
 }

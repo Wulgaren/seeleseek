@@ -1,9 +1,16 @@
 import SwiftUI
+import AppKit
 import SeeleseekCore
 
 struct SidebarConsoleView: View {
     @State private var activityLog = ActivityLog.shared
     @State private var isExpanded = false
+    /// Snapshot taken when collapsing (or on first appear). Collapsed UI
+    /// must not read `activityLog.events` so Observation cannot invalidate
+    /// the sidebar while the console is closed.
+    @State private var frozenPeek: ActivityLog.ActivityEvent?
+    @State private var frozenCount = 0
+    @State private var didCopy = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,6 +24,9 @@ struct SidebarConsoleView: View {
             }
         }
         .background(SeeleColors.surfaceSecondary)
+        .onAppear {
+            captureFreezeFrame()
+        }
     }
 
     // MARK: - Collapsed
@@ -24,7 +34,7 @@ struct SidebarConsoleView: View {
     private var collapsedView: some View {
         VStack(spacing: 0) {
             header
-            if let latest = activityLog.events.first {
+            if let latest = frozenPeek {
                 peekLine(latest)
             }
         }
@@ -48,9 +58,9 @@ struct SidebarConsoleView: View {
                 }
                 .onChange(of: activityLog.events.count) { _, _ in
                     if let latest = activityLog.events.first {
-                        withAnimation {
-                            proxy.scrollTo(latest.id, anchor: .bottom)
-                        }
+                        // No animation — animated scrollTo during hitch
+                        // logging would pollute the signal we're measuring.
+                        proxy.scrollTo(latest.id, anchor: .bottom)
                     }
                 }
             }
@@ -66,9 +76,7 @@ struct SidebarConsoleView: View {
     private var header: some View {
         HStack(spacing: SeeleSpacing.xs) {
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isExpanded.toggle()
-                }
+                toggleExpanded()
             } label: {
                 HStack(spacing: SeeleSpacing.xs) {
                     Image(systemName: "terminal.fill")
@@ -80,8 +88,9 @@ struct SidebarConsoleView: View {
                         .font(SeeleTypography.caption)
                         .foregroundStyle(SeeleColors.textSecondary)
 
-                    if !activityLog.events.isEmpty {
-                        Text("\(activityLog.events.count)")
+                    let count = isExpanded ? activityLog.events.count : frozenCount
+                    if count > 0 {
+                        Text("\(count)")
                             .font(SeeleTypography.monoXSmall)
                             .foregroundStyle(SeeleColors.textTertiary)
                             .padding(.horizontal, 4)
@@ -94,12 +103,24 @@ struct SidebarConsoleView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Console, \(activityLog.events.count) events")
+            .accessibilityLabel("Console, \(isExpanded ? activityLog.events.count : frozenCount) events")
             .accessibilityValue(isExpanded ? "expanded" : "collapsed")
 
             if isExpanded {
                 Button {
+                    copyAll()
+                } label: {
+                    Image(systemName: didCopy ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 9))
+                        .foregroundStyle(SeeleColors.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(didCopy ? "Copied" : "Copy all")
+                .help("Copy all console lines")
+
+                Button {
                     activityLog.clear()
+                    captureFreezeFrame()
                 } label: {
                     Image(systemName: "trash")
                         .font(.system(size: 9))
@@ -118,13 +139,40 @@ struct SidebarConsoleView: View {
                 .frame(width: 20, height: 20)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        isExpanded.toggle()
-                    }
+                    toggleExpanded()
                 }
         }
         .padding(.horizontal, SeeleSpacing.lg)
         .padding(.vertical, SeeleSpacing.sm)
+    }
+
+    // MARK: - Actions
+
+    private func toggleExpanded() {
+        if isExpanded {
+            // About to collapse — freeze the visible peek/count.
+            captureFreezeFrame()
+        }
+        withAnimation(.easeInOut(duration: 0.2)) {
+            isExpanded.toggle()
+        }
+        didCopy = false
+    }
+
+    private func captureFreezeFrame() {
+        frozenPeek = activityLog.events.first
+        frozenCount = activityLog.events.count
+    }
+
+    private func copyAll() {
+        let dump = activityLog.copyableDump()
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(dump, forType: .string)
+        didCopy = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.5))
+            didCopy = false
+        }
     }
 
     // MARK: - Rows
@@ -155,21 +203,34 @@ struct SidebarConsoleView: View {
     }
 
     private func consoleRow(_ event: ActivityLog.ActivityEvent) -> some View {
-        HStack(spacing: SeeleSpacing.xs) {
-            Image(systemName: event.type.icon)
-                .font(.system(size: 8))
-                .foregroundStyle(event.type.color)
-                .frame(width: 12)
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: SeeleSpacing.xs) {
+                Image(systemName: event.type.icon)
+                    .font(.system(size: 8))
+                    .foregroundStyle(event.type.color)
+                    .frame(width: 12)
 
-            Text(formatTime(event.timestamp))
-                .font(SeeleTypography.monoXSmall)
-                .foregroundStyle(SeeleColors.textTertiary)
+                Text(formatTime(event.timestamp))
+                    .font(SeeleTypography.monoXSmall)
+                    .foregroundStyle(SeeleColors.textTertiary)
 
-            Text(event.title)
-                .font(SeeleTypography.monoSmall)
-                .foregroundStyle(SeeleColors.textSecondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
+                Text(event.title)
+                    .font(SeeleTypography.monoSmall)
+                    .foregroundStyle(SeeleColors.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            // Hitch suspects are the reason this console exists during
+            // lag hunts — show them without requiring Copy all.
+            if event.type == .scrollHitch, let detail = event.detail {
+                Text(detail)
+                    .font(SeeleTypography.monoXSmall)
+                    .foregroundStyle(SeeleColors.textTertiary)
+                    .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 12 + SeeleSpacing.xs)
+            }
         }
         .padding(.horizontal, SeeleSpacing.lg)
         .padding(.vertical, 1)
@@ -179,7 +240,11 @@ struct SidebarConsoleView: View {
     }
 
     private func rowAccessibilityLabel(_ event: ActivityLog.ActivityEvent) -> String {
-        "\(event.type.spokenName), \(formatTime(event.timestamp)), \(event.title)"
+        var label = "\(event.type.spokenName), \(formatTime(event.timestamp)), \(event.title)"
+        if event.type == .scrollHitch, let detail = event.detail {
+            label += ", \(detail)"
+        }
+        return label
     }
 
     private func formatTime(_ date: Date) -> String {
@@ -262,6 +327,10 @@ private func seedConsolePreview(_ events: () -> Void) {
                 log.logError("Connection refused", detail: "peer unavailable: 203.0.113.1:2234")
                 log.logPeerDisconnected(username: "archivist99")
                 log.logInfo("NAT mapped port 2234")
+                log.logScrollHitch(
+                    durationMs: 48,
+                    detail: "tab=Search search=412 grouped=0 dl=3(active:1) ul=0(active:0) browseTabs=0 browseExpanded=0 wishlist=2 recent=[Download started,Search result,Search started]"
+                )
             }
         }
 }

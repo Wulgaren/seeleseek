@@ -84,6 +84,14 @@ struct MainView: View {
             detailView
         }
         .frame(minWidth: 900, minHeight: 600)
+        .onAppear {
+            ScrollHitchMonitor.shared.start {
+                ScrollHitchMonitor.suspectSnapshot(from: appState)
+            }
+        }
+        .onDisappear {
+            ScrollHitchMonitor.shared.stop()
+        }
         .sheet(isPresented: Bindable(appState.socialState).showProfileSheet) {
             if let profile = appState.socialState.viewingProfile {
                 UserProfileSheet(profile: profile)

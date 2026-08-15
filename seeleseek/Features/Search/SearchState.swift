@@ -45,6 +45,11 @@ final class SearchState {
     @ObservationIgnored private var inactivityTimers: [UInt32: Task<Void, Never>] = [:]
     private static let searchInactivityTimeout: Duration = .seconds(20)
 
+    /// Coalesce display-model rebuilds while results are still streaming so
+    /// the LazyVStack is not rebuilt on every peer batch.
+    @ObservationIgnored private var recomputeTask: Task<Void, Never>?
+    private static let streamingRecomputeInterval: Duration = .milliseconds(150)
+
     private func scheduleInactivityTimer(token: UInt32) {
         inactivityTimers[token]?.cancel()
         inactivityTimers[token] = Task { [weak self] in
@@ -411,6 +416,25 @@ final class SearchState {
         case none, partial, all
     }
 
+    /// While a search is streaming, rebuild the display model at most every
+    /// `streamingRecomputeInterval`. Filter/sort/tab changes still call
+    /// `recomputeFilteredResults()` directly for an immediate update.
+    private func scheduleRecomputeFilteredResults(isStreaming: Bool) {
+        if !isStreaming {
+            recomputeTask?.cancel()
+            recomputeTask = nil
+            recomputeFilteredResults()
+            return
+        }
+        guard recomputeTask == nil else { return }
+        recomputeTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.streamingRecomputeInterval)
+            guard let self, !Task.isCancelled else { return }
+            self.recomputeTask = nil
+            self.recomputeFilteredResults()
+        }
+    }
+
     func recomputeFilteredResults() {
         guard let search = currentSearch else {
             filteredResults = []
@@ -590,7 +614,7 @@ final class SearchState {
 
         searches[index].results.append(contentsOf: resultsToAdd)
         if index == selectedSearchIndex {
-            recomputeFilteredResults()
+            scheduleRecomputeFilteredResults(isStreaming: searches[index].isSearching)
         }
         logger.info("Added \(resultsToAdd.count) results to '\(self.searches[index].query)' (total: \(self.searches[index].results.count))")
 
@@ -602,6 +626,9 @@ final class SearchState {
             logger.info("Search '\(self.searches[index].query)' reached limit of \(maxResults) results, stopping")
             searches[index].isSearching = false
             cancelInactivityTimer(token: token)
+            if index == selectedSearchIndex {
+                scheduleRecomputeFilteredResults(isStreaming: false)
+            }
             announceSearchComplete(searches[index])
         }
     }
@@ -614,6 +641,13 @@ final class SearchState {
         let wasSearching = searches[index].isSearching
         searches[index].isSearching = false
         if wasSearching {
+            // Flush any coalesced display rebuild so the final result set
+            // is visible as soon as the spinner stops.
+            recomputeTask?.cancel()
+            recomputeTask = nil
+            if index == selectedSearchIndex {
+                recomputeFilteredResults()
+            }
             announceSearchComplete(searches[index])
         }
 

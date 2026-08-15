@@ -5,11 +5,10 @@ import SeeleseekCore
 /// view — see `SearchListItem` for why a variable subview count is unsound
 /// inside the results `LazyVStack`.
 struct SearchResultListItemView: View {
-    @Environment(\.appState) private var appState
-
     let item: SearchListItem
-
-    private var searchState: SearchState { appState.searchState }
+    var isSelectionMode: Bool = false
+    var isSelected: Bool = false
+    var onToggleSelection: (() -> Void)? = nil
 
     var body: some View {
         switch item {
@@ -41,9 +40,9 @@ struct SearchResultListItemView: View {
         SearchResultRow(
             result: result,
             isNestedInGroup: nested,
-            isSelectionMode: searchState.isSelectionMode,
-            isSelected: searchState.selectedResults.contains(result.id),
-            onToggleSelection: { searchState.toggleSelection(result.id) }
+            isSelectionMode: isSelectionMode,
+            isSelected: isSelected,
+            onToggleSelection: onToggleSelection
         )
     }
 }

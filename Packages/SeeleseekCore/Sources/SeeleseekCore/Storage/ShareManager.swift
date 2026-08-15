@@ -568,6 +568,31 @@ public final class ShareManager {
         let terms = Set(Self.tokenize(query))
         guard !terms.isEmpty else { return [] }
 
+        // Snapshot on the main actor, then match off-main. Distributed
+        // search arrives in a steady drip on a busy relay; running the
+        // intersection here used to hitch the UI even though the scan
+        // itself is pure CPU over two dictionaries.
+        let wordIndexSnapshot = wordIndex
+        let fileIndexSnapshot = fileIndex
+
+        return await Task.detached(priority: .utility) {
+            Self.match(
+                terms: terms,
+                wordIndex: wordIndexSnapshot,
+                fileIndex: fileIndexSnapshot,
+                includeBuddyOnly: includeBuddyOnly
+            )
+        }.value
+    }
+
+    /// Pure posting-list intersection over snapshots. `nonisolated` so
+    /// `Task.detached` can run it without hopping back to MainActor.
+    nonisolated private static func match(
+        terms: Set<String>,
+        wordIndex: [String: [Int]],
+        fileIndex: [IndexedFile],
+        includeBuddyOnly: Bool
+    ) -> [IndexedFile] {
         // Every term must have a posting list, else no file can match.
         var lists: [[Int]] = []
         lists.reserveCapacity(terms.count)
@@ -586,6 +611,7 @@ public final class ShareManager {
         // Materialize in index order; apply the visibility gate here,
         // same semantics as the old linear filter.
         return candidates.sorted().compactMap { position in
+            guard position < fileIndex.count else { return nil }
             let file = fileIndex[position]
             if !includeBuddyOnly && file.visibility == .buddies { return nil }
             return file

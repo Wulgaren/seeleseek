@@ -38,16 +38,17 @@ struct SearchResultRow: View {
 
     @State private var isHovered = false
 
-    private var downloadStatus: Transfer.TransferStatus? {
-        appState.transferState.downloadStatus(for: result.filename, from: result.username)
-    }
+    /// Download / ignore chrome captured on appear (and refreshed on hover),
+    /// same rationale as `peerStatus`: live reads of `downloadStatusIndex` /
+    /// `ignoredUsers` invalidate every visible search row on unrelated updates.
+    @State private var downloadStatus: Transfer.TransferStatus?
+    @State private var isIgnored = false
+    @State private var folderRequestState: AppState.FolderRequestState?
 
     private var isQueued: Bool {
         guard let s = downloadStatus else { return false }
         return s != .completed && s != .cancelled && s != .failed
     }
-
-    private var isIgnored: Bool { appState.socialState.isIgnored(result.username) }
 
     /// Peer status captured at row appear rather than read live from
     /// `SocialState.peerStatuses`. Reading the dict live would invalidate
@@ -62,8 +63,25 @@ struct SearchResultRow: View {
         peerStatus = appState.socialState.peerStatus(for: result.username)
     }
 
+    private func refreshTransferChrome() {
+        downloadStatus = appState.transferState.downloadStatus(
+            for: result.filename,
+            from: result.username
+        )
+        isIgnored = appState.socialState.isIgnored(result.username)
+        folderRequestState = appState.folderRequestState(for: result)
+    }
+
+    private func refreshRowChrome() {
+        refreshPeerStatus()
+        refreshTransferChrome()
+    }
+
     var body: some View {
-        StandardListRow(onHoverChanged: { isHovered = $0 }) {
+        StandardListRow(onHoverChanged: { hovering in
+            isHovered = hovering
+            if hovering { refreshTransferChrome() }
+        }) {
             HStack(alignment: .top, spacing: SeeleSpacing.sm) {
                 if isSelectionMode {
                     selectionCheckbox
@@ -117,8 +135,9 @@ struct SearchResultRow: View {
             Button("Copy filename", action: copyFilename)
             Button("Copy full path", action: copyPath)
         }
-        .onAppear { refreshPeerStatus() }
-        .onChange(of: result.username) { _, _ in refreshPeerStatus() }
+        .onAppear { refreshRowChrome() }
+        .onChange(of: result.username) { _, _ in refreshRowChrome() }
+        .onChange(of: result.filename) { _, _ in refreshTransferChrome() }
     }
 
     // MARK: - Selection checkbox
@@ -359,11 +378,10 @@ struct SearchResultRow: View {
     }
 
     private var secondaryActions: some View {
-        let folderRequestState = appState.folderRequestState(for: result)
         // Hit-testing stays on even at opacity 0 so Tab focus (and, via
         // `accessibilityAction` below, VoiceOver rotor) can reach these
         // actions. The invisible focus ring is an accepted tradeoff.
-        return HStack(spacing: SeeleSpacing.xxs) {
+        HStack(spacing: SeeleSpacing.xxs) {
             folderSlot(folderRequestState)
             RowIconButton(
                 systemName: "person.crop.circle",
@@ -482,7 +500,7 @@ struct SearchResultRow: View {
         // The row is a combined element with an explicit label, which
         // overrides FolderRequestIndicator's own label — so the request
         // state has to be surfaced here or VoiceOver never hears it.
-        switch appState.folderRequestState(for: result) {
+        switch folderRequestState {
         case .fetching:
             parts.append("getting folder contents")
         case .failed(let reason):

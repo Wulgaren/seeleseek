@@ -31,7 +31,17 @@ public final class PeerConnectionPool {
 
     // MARK: - Connection Tracking
 
+    /// Live peer bookkeeping. Not observable — connect storms would otherwise
+    /// invalidate every SwiftUI observer once per peer.
+    @ObservationIgnored private var liveConnections: [String: PeerConnectionInfo] = [:]
+
+    /// UI-facing snapshot of `liveConnections`, refreshed at most once per
+    /// `uiPublishInterval` (~1s). Monitor / peer views read this.
     public private(set) var connections: [String: PeerConnectionInfo] = [:]
+
+    @ObservationIgnored private var uiPublishTask: Task<Void, Never>?
+    @ObservationIgnored private var uiPublishDirty = false
+    private static let uiPublishInterval: Duration = .seconds(1)
 
     /// Extension capabilities discovered via ExtendedClientInfo, keyed by peer
     /// username. Stored here *as well as* on the `PeerConnectionInfo` row
@@ -65,6 +75,15 @@ public final class PeerConnectionPool {
     /// SwiftUI isn't invalidated thousands of times per second during transfers.
     @ObservationIgnored private var pendingBytesReceived: UInt64 = 0
     @ObservationIgnored private var pendingBytesSent: UInt64 = 0
+
+    /// Lifetime / diagnostic counters — live values are ObservationIgnored so
+    /// connect storms don't invalidate Monitor/Diagnostics once per peer.
+    /// Published copies flush with the connections snapshot (~1s).
+    @ObservationIgnored private var liveTotalConnections: UInt32 = 0
+    @ObservationIgnored private var liveConnectToPeerCount: Int = 0
+    @ObservationIgnored private var livePierceFirewallCount: Int = 0
+    @ObservationIgnored private var livePeerInitCount: Int = 0
+
     public private(set) var totalConnections: UInt32 = 0
     public private(set) var activeConnections: Int = 0
     public private(set) var connectToPeerCount: Int = 0  // How many ConnectToPeer messages we've received
@@ -256,6 +275,42 @@ public final class PeerConnectionPool {
         return true
     }
 
+    // MARK: - UI publish coalesce
+
+    /// Mark the published connections snapshot + diagnostic counters dirty.
+    /// Flushes at most once per `uiPublishInterval` so connect storms do not
+    /// invalidate SwiftUI once per peer.
+    private func noteConnectionsChanged() {
+        uiPublishDirty = true
+        guard uiPublishTask == nil else { return }
+        uiPublishTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: Self.uiPublishInterval)
+            guard let self, !Task.isCancelled else { return }
+            self.uiPublishTask = nil
+            self.flushConnectionsToUI()
+        }
+    }
+
+    private func flushConnectionsToUI() {
+        guard uiPublishDirty else { return }
+        uiPublishDirty = false
+        connections = liveConnections
+        activeConnections = liveConnections.count
+        totalConnections = liveTotalConnections
+        connectToPeerCount = liveConnectToPeerCount
+        pierceFirewallCount = livePierceFirewallCount
+        peerInitCount = livePeerInitCount
+    }
+
+    /// Immediate publish — disconnect-all / teardown should not leave the
+    /// UI showing ghosts for a full coalesce window.
+    private func flushConnectionsToUINow() {
+        uiPublishTask?.cancel()
+        uiPublishTask = nil
+        uiPublishDirty = true
+        flushConnectionsToUI()
+    }
+
     // MARK: - Connection Management
 
     /// Our username for PeerInit messages
@@ -345,13 +400,13 @@ public final class PeerConnectionPool {
             connectionType: connectionType,
             connectedAt: Date()
         )
-        connections[info.id] = info
+        liveConnections[info.id] = info
 
         // CRITICAL: Store the actual PeerConnection to keep it alive!
         activeConnections_[connectionId] = connection
 
-        activeConnections = connections.count
-        totalConnections += 1
+        noteConnectionsChanged()
+        liveTotalConnections += 1
 
         // The connection can die between connect()/sendPeerInit and the
         // tracking insertion above — the death event is consumed before the
@@ -360,9 +415,9 @@ public final class PeerConnectionPool {
         // sweep. Re-check liveness and run the same removal path.
         if await !connection.isConnected {
             releaseIPSlot(connectionId: connectionId, ip: ip)
-            connections.removeValue(forKey: connectionId)
+            liveConnections.removeValue(forKey: connectionId)
             activeConnections_.removeValue(forKey: connectionId)
-            activeConnections = connections.count
+            noteConnectionsChanged()
             logger.debug("Connection to \(username) died during setup, removed from tracking")
             throw PeerConnectionError.connectionFailed("Connection died during setup")
         }
@@ -387,10 +442,10 @@ public final class PeerConnectionPool {
     ) {
         if let entry = activeConnections_.first(where: { $0.value === connection }) {
             let connectionId = entry.key
-            connections.removeValue(forKey: connectionId)
+            liveConnections.removeValue(forKey: connectionId)
             activeConnections_.removeValue(forKey: connectionId)
             lastActivities.removeValue(forKey: connectionId)
-            activeConnections = connections.count
+            noteConnectionsChanged()
         }
 
         logger.info("Handing outgoing F connection to transfer manager: \(username) token=\(token)")
@@ -446,7 +501,9 @@ public final class PeerConnectionPool {
     /// admission limits (per-IP, global, rate-limit).
     public func handleIncomingConnection(_ nwConnection: NWConnection, obfuscated: Bool = false) async {
         // Enforce connection limit to prevent resource exhaustion
-        if activeConnections >= maxConnections {
+        // Use live count — published `activeConnections` can lag by up to
+        // `uiPublishInterval` and would overshoot the cap during a storm.
+        if liveConnections.count >= maxConnections {
             logger.warning("Connection limit reached (\(self.maxConnections)), rejecting connection from \(String(describing: nwConnection.endpoint))")
             nwConnection.cancel()
             return
@@ -507,13 +564,13 @@ public final class PeerConnectionPool {
                 connectionType: .peer,
                 connectedAt: Date()
             )
-            connections[info.id] = info
+            liveConnections[info.id] = info
 
             // CRITICAL: Store the actual PeerConnection to keep it alive!
             activeConnections_[connectionId] = connection
 
-            activeConnections = connections.count
-            totalConnections += 1
+            noteConnectionsChanged()
+            liveTotalConnections += 1
 
             // CRITICAL: Start the receive loop AFTER all callbacks are configured
             // This fixes the race condition where F connection data arrives before callbacks are set
@@ -534,19 +591,19 @@ public final class PeerConnectionPool {
         // prefix-on-key. Prefix matching misses incoming connections (keyed
         // "incoming-*") and false-positives when one username is a dash-
         // prefix of another (e.g. "bob-1" matching the key "bob-12-42").
-        let keysToRemove = connections.compactMap { (key, info) -> String? in
+        let keysToRemove = liveConnections.compactMap { (key, info) -> String? in
             info.username == username ? key : nil
         }
         for key in keysToRemove {
-            if let info = connections[key] {
+            if let info = liveConnections[key] {
                 releaseIPSlot(connectionId: key, ip: info.ip)
             }
-            connections.removeValue(forKey: key)
+            liveConnections.removeValue(forKey: key)
             if let conn = activeConnections_.removeValue(forKey: key) {
                 await conn.disconnect()
             }
         }
-        activeConnections = connections.count
+        noteConnectionsChanged()
     }
 
     /// Pre-register the username we expect on the indirect PierceFirewall
@@ -575,7 +632,7 @@ public final class PeerConnectionPool {
         for (key, conn) in activeConnections_ {
             if conn === connection {
                 // Found the connection, update its info
-                if let info = connections[key] {
+                if let info = liveConnections[key] {
                     let newInfo = PeerConnectionInfo(
                         id: info.id,
                         username: username,
@@ -587,8 +644,9 @@ public final class PeerConnectionPool {
                         bytesSent: info.bytesSent,
                         connectedAt: info.connectedAt
                     )
-                    connections[key] = newInfo
+                    liveConnections[key] = newInfo
                     logger.debug("Updated connection \(key) username to \(username)")
+                    noteConnectionsChanged()
                 }
                 break
             }
@@ -600,14 +658,14 @@ public final class PeerConnectionPool {
             await conn.disconnect()
         }
         activeConnections_.removeAll()
-        connections.removeAll()
+        liveConnections.removeAll()
         lastActivities.removeAll()
         connectionsPerIP.removeAll()
         heldIPSlots.removeAll()
         // In-flight establishment stamps would otherwise leak across
         // sessions and mislabel a future incoming PierceFirewall.
         pierceFirewallExpectedUsernames.removeAll()
-        activeConnections = 0
+        flushConnectionsToUINow()
     }
 
     /// Get an active connection by ID
@@ -625,7 +683,7 @@ public final class PeerConnectionPool {
     /// Only P-type connections match: an F-type socket has no receive
     /// loop, so a message written to one gets no reply and no error.
     public func getConnectionForUser(_ username: String) async -> PeerConnection? {
-        let matchingKeys = connections.compactMap { (key, info) -> String? in
+        let matchingKeys = liveConnections.compactMap { (key, info) -> String? in
             info.username == username && info.connectionType == .peer ? key : nil
         }
 
@@ -636,11 +694,11 @@ public final class PeerConnectionPool {
                 return connection
             } else {
                 logger.debug("Found stale connection for \(username) (key: \(key)), removing")
-                if let info = connections[key] {
+                if let info = liveConnections[key] {
                     releaseIPSlot(connectionId: key, ip: info.ip)
                 }
                 activeConnections_.removeValue(forKey: key)
-                connections.removeValue(forKey: key)
+                liveConnections.removeValue(forKey: key)
             }
         }
 
@@ -650,15 +708,18 @@ public final class PeerConnectionPool {
     // MARK: - Diagnostic Counters
 
     public func incrementConnectToPeerCount() {
-        connectToPeerCount += 1
+        liveConnectToPeerCount += 1
+        noteConnectionsChanged()
     }
 
     public func incrementPierceFirewallCount() {
-        pierceFirewallCount += 1
+        livePierceFirewallCount += 1
+        noteConnectionsChanged()
     }
 
     public func incrementPeerInitCount() {
-        peerInitCount += 1
+        livePeerInitCount += 1
+        noteConnectionsChanged()
     }
 
     /// Bump last-activity for the connection that just emitted an event.
@@ -695,7 +756,7 @@ public final class PeerConnectionPool {
         let stuckHandshakeCutoff = Date().addingTimeInterval(-30)
 
         var toRemove: [String] = []
-        for (id, info) in connections {
+        for (id, info) in liveConnections {
             // Connection-level byte activity. Pool events only fire per
             // decoded message, so a multi-MB frame accumulating (browse)
             // bumps no event for minutes — but bytes ARE flowing. Read the
@@ -714,14 +775,14 @@ public final class PeerConnectionPool {
 
         var connectionsToClose: [PeerConnection] = []
         for id in toRemove {
-            if let info = connections[id] {
+            if let info = liveConnections[id] {
                 releaseIPSlot(connectionId: id, ip: info.ip)
             }
             if let conn = activeConnections_[id] {
                 connectionsToClose.append(conn)
                 logger.info("Closed idle connection: \(id)")
             }
-            connections.removeValue(forKey: id)
+            liveConnections.removeValue(forKey: id)
             activeConnections_.removeValue(forKey: id)
             lastActivities.removeValue(forKey: id)
         }
@@ -736,7 +797,7 @@ public final class PeerConnectionPool {
             }
         }
 
-        activeConnections = connections.count
+        noteConnectionsChanged()
 
         // Evict rate-limit history for IPs whose most-recent attempt falls
         // outside the window. Without this pass the dict's key set never
@@ -754,10 +815,10 @@ public final class PeerConnectionPool {
         // the observable-mutation hot path. The value is only ever looked
         // up keyed by a live connection id, so orphaned entries are
         // harmless between sweeps; they just need periodic eviction.
-        lastActivities = lastActivities.filter { connections[$0.key] != nil }
+        lastActivities = lastActivities.filter { liveConnections[$0.key] != nil }
 
         if !toRemove.isEmpty {
-            logger.info("Cleaned up \(toRemove.count) stale connections, \(self.activeConnections) active")
+            logger.info("Cleaned up \(toRemove.count) stale liveConnections, \(self.activeConnections) active")
         }
     }
 
@@ -823,16 +884,16 @@ public final class PeerConnectionPool {
     @ObservationIgnored private var trafficSamples: [String: (date: Date, total: UInt64)] = [:]
 
     /// Pulls each live connection's wire-level byte counters into the
-    /// observable `connections` info and derives `currentSpeed` from the
-    /// delta since the previous tick. Only writes entries whose counters
-    /// actually moved, so idle sessions don't invalidate SwiftUI observers.
+    /// published `connections` snapshot (via `noteConnectionsChanged`) and
+    /// derives `currentSpeed` from the delta since the previous tick. Only
+    /// writes entries whose counters actually moved.
     private func refreshConnectionTraffic() async {
         let now = Date()
         for (id, connection) in activeConnections_ {
             let (rx, tx) = await connection.trafficSnapshot
             // Re-fetch after the hop: the entry can be removed (handoff,
             // disconnect) while we were suspended.
-            guard var info = connections[id] else { continue }
+            guard var info = liveConnections[id] else { continue }
 
             let total = rx &+ tx
             var speed = 0.0
@@ -848,10 +909,11 @@ public final class PeerConnectionPool {
                 info.bytesReceived = rx
                 info.bytesSent = tx
                 info.currentSpeed = speed
-                connections[id] = info
+                liveConnections[id] = info
+                noteConnectionsChanged()
             }
         }
-        trafficSamples = trafficSamples.filter { connections[$0.key] != nil }
+        trafficSamples = trafficSamples.filter { liveConnections[$0.key] != nil }
     }
 
     private func captureSpeedSample() {
@@ -924,7 +986,7 @@ public final class PeerConnectionPool {
             // concurrent connections (browse + search + direct download),
             // or when one username is a dash-prefix of another
             // (e.g. "bob-1" vs "bob-12").
-            connections[connectionId]?.state = state
+            liveConnections[connectionId]?.state = state
             // `.failed` is terminal too: the connection cancels its socket
             // and finishes its event stream right after yielding it, so the
             // follow-up `.disconnected` never arrives. Without removal here,
@@ -933,12 +995,12 @@ public final class PeerConnectionPool {
             switch state {
             case .disconnected, .failed:
                 releaseIPSlot(connectionId: connectionId, ip: capturedIP)
-                connections.removeValue(forKey: connectionId)
+                liveConnections.removeValue(forKey: connectionId)
                 activeConnections_.removeValue(forKey: connectionId)
-                activeConnections = connections.count
             default:
                 break
             }
+            noteConnectionsChanged()
 
         case .searchReply(let token, let results):
             logger.info("Search results: \(results.count) from \(username) (token=\(token))")
@@ -947,9 +1009,9 @@ public final class PeerConnectionPool {
             Task {
                 await connection.disconnect()
                 self.releaseIPSlot(connectionId: connectionId, ip: capturedIP)
-                self.connections.removeValue(forKey: connectionId)
+                self.liveConnections.removeValue(forKey: connectionId)
                 self.activeConnections_.removeValue(forKey: connectionId)
-                self.activeConnections = self.connections.count
+                self.noteConnectionsChanged()
             }
 
         case .sharesReceived(let files):
@@ -978,9 +1040,9 @@ public final class PeerConnectionPool {
                     detail: capturedIP.isEmpty ? "matches block pattern" : "\(capturedIP) — matches block pattern"
                 )
                 releaseIPSlot(connectionId: connectionId, ip: capturedIP)
-                connections.removeValue(forKey: connectionId)
+                liveConnections.removeValue(forKey: connectionId)
                 activeConnections_.removeValue(forKey: connectionId)
-                activeConnections = connections.count
+                noteConnectionsChanged()
                 Task { await connection.disconnect() }
                 return
             }
@@ -991,7 +1053,7 @@ public final class PeerConnectionPool {
             }
 
             // Update the connection info
-            if var existingInfo = connections[connectionId] {
+            if var existingInfo = liveConnections[connectionId] {
                 existingInfo = PeerConnectionInfo(
                     id: connectionId,
                     username: discoveredUsername,
@@ -1001,7 +1063,8 @@ public final class PeerConnectionPool {
                     connectionType: existingInfo.connectionType,
                     connectedAt: existingInfo.connectedAt
                 )
-                connections[connectionId] = existingInfo
+                liveConnections[connectionId] = existingInfo
+                noteConnectionsChanged()
             }
 
         case .fileTransferConnection(let ftUsername, let token, let fileConnection):
@@ -1015,9 +1078,9 @@ public final class PeerConnectionPool {
             // framing. Same pattern as .pierceFirewall below; both events
             // transfer ownership of the connection from pool to consumer.
             releaseIPSlot(connectionId: connectionId, ip: capturedIP)
-            connections.removeValue(forKey: connectionId)
+            liveConnections.removeValue(forKey: connectionId)
             activeConnections_.removeValue(forKey: connectionId)
-            activeConnections = connections.count
+            noteConnectionsChanged()
             eventContinuation.yield(.fileTransferConnection(username: ftUsername, token: token, connection: fileConnection))
 
         case .pierceFirewall(let token):
@@ -1037,7 +1100,7 @@ public final class PeerConnectionPool {
             // until many retry attempts" symptom.
             if let expectedUsername = pierceFirewallExpectedUsernames.removeValue(forKey: token) {
                 await connection.setPeerUsername(expectedUsername)
-                if var info = connections[connectionId] {
+                if var info = liveConnections[connectionId] {
                     info = PeerConnectionInfo(
                         id: info.id,
                         username: expectedUsername,
@@ -1049,14 +1112,14 @@ public final class PeerConnectionPool {
                         bytesSent: info.bytesSent,
                         connectedAt: info.connectedAt
                     )
-                    connections[connectionId] = info
+                    liveConnections[connectionId] = info
                 }
                 logger.debug("Stamped username '\(expectedUsername)' on indirect connection (token=\(token))")
             }
 
-            connections.removeValue(forKey: connectionId)
+            liveConnections.removeValue(forKey: connectionId)
             activeConnections_.removeValue(forKey: connectionId)
-            activeConnections = connections.count
+            noteConnectionsChanged()
             eventContinuation.yield(.pierceFirewall(token: token, connection: connection))
 
         case .uploadDenied(let peerUsername, let filename, let reason):
@@ -1145,12 +1208,12 @@ public final class PeerConnectionPool {
     // MARK: - Test-only accessors
 
     internal func _seedConnectionForTest(_ info: PeerConnectionInfo) {
-        connections[info.id] = info
-        activeConnections = connections.count
+        liveConnections[info.id] = info
+        flushConnectionsToUINow()
     }
 
     internal func _connectionInfo(id: String) -> PeerConnectionInfo? {
-        connections[id]
+        liveConnections[id]
     }
 
     internal func _touchActivityForTest(connectionId: String) {
@@ -1161,9 +1224,9 @@ public final class PeerConnectionPool {
     /// via the pool event stream after a peer's PeerInit type=F.
     internal func _simulateFileTransferHandoffForTest(connectionId: String, ip: String) {
         decrementIPCounter(for: ip)
-        connections.removeValue(forKey: connectionId)
+        liveConnections.removeValue(forKey: connectionId)
         activeConnections_.removeValue(forKey: connectionId)
-        activeConnections = connections.count
+        noteConnectionsChanged()
     }
 
     /// Drive the outgoing-stateChanged branch of `handlePeerEvent` directly.
@@ -1176,11 +1239,11 @@ public final class PeerConnectionPool {
         username: String,
         state: PeerConnection.State
     ) {
-        connections[connectionId]?.state = state
+        liveConnections[connectionId]?.state = state
         if case .disconnected = state {
-            connections.removeValue(forKey: connectionId)
+            liveConnections.removeValue(forKey: connectionId)
             activeConnections_.removeValue(forKey: connectionId)
-            activeConnections = connections.count
+            noteConnectionsChanged()
         }
     }
 }
