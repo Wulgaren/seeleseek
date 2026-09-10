@@ -24,15 +24,8 @@ final class AppState {
     var latestAdminMessage: AdminMessage?
 
     // MARK: - Navigation
+    var navigation = NavigationState()
     var selectedTab: NavigationTab = .search
-    var sidebarSelection: SidebarItem? = .search
-    /// Set by ⌘F; SearchView consumes it once the field is on screen.
-    var searchFieldFocusPending = false
-
-    func requestSearchFieldFocus() {
-        sidebarSelection = .search
-        searchFieldFocusPending = true
-    }
 
     // MARK: - Availability
 
@@ -720,96 +713,6 @@ final class AppState {
         updateState.checkOnLaunch()
 
         logger.info("Persisted state loaded")
-    }
-}
-
-// MARK: - Navigation Types
-
-enum NavigationTab: String, CaseIterable, Identifiable {
-    case search
-    case transfers
-    case chat
-    case browse
-    case settings
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .search: "Search"
-        case .transfers: "Transfers"
-        case .chat: "Chat"
-        case .browse: "Browse"
-        case .settings: "Settings"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .search: "magnifyingglass"
-        case .transfers: "arrow.down.arrow.up"
-        case .chat: "bubble.left.and.bubble.right"
-        case .browse: "folder"
-        case .settings: "gear"
-        }
-    }
-}
-
-enum SidebarItem: Hashable, Identifiable {
-    case search
-    case wishlists
-    case transfers
-    case chat
-    case browse
-    case social
-    case user(String)
-    case room(String)
-    case networkMonitor
-    case settings
-
-    var id: String {
-        switch self {
-        case .search: "search"
-        case .wishlists: "wishlists"
-        case .transfers: "transfers"
-        case .chat: "chat"
-        case .browse: "browse"
-        case .social: "social"
-        case .user(let name): "user-\(name)"
-        case .room(let name): "room-\(name)"
-        case .networkMonitor: "networkMonitor"
-        case .settings: "settings"
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .search: "Search"
-        case .wishlists: "Wishlists"
-        case .transfers: "Transfers"
-        case .chat: "Chat"
-        case .browse: "Browse"
-        case .social: "Friends"
-        case .user(let name): name
-        case .room(let name): name
-        case .networkMonitor: "Activity"
-        case .settings: "Settings"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .search: "magnifyingglass"
-        case .wishlists: "star"
-        case .transfers: "arrow.up.arrow.down"
-        case .chat: "bubble.left.and.bubble.right"
-        case .browse: "folder"
-        case .social: "person.2"
-        case .user: "person"
-        case .room: "person.3"
-        case .networkMonitor: "waveform.path.ecg"
-        case .settings: "gear"
-        }
     }
 }
 

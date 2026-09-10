@@ -2,27 +2,13 @@ import SwiftUI
 import SeeleseekCore
 
 struct NetworkMonitorView: View {
-    @State private var selectedTab: MonitorTab = .overview
-
-    enum MonitorTab: String, CaseIterable {
-        case overview = "Overview"
-        case peers = "Peers"
-        case search = "Search"
-        case history = "History"
-
-        var icon: String {
-            switch self {
-            case .overview: "waveform.path.ecg"
-            case .peers: "person.line.dotted.person"
-            case .search: "magnifyingglass"
-            case .history: "clock.arrow.trianglehead.counterclockwise.rotate.90"
-            }
-        }
-    }
+    @Environment(\.appState) private var appState
 
     var body: some View {
+        @Bindable var navigation = appState.navigation
+
         VStack(spacing: 0) {
-            StandardTabBar(selection: $selectedTab, icon: { $0.icon }) {
+            StandardTabBar(selection: $navigation.monitorTab, icon: { $0.icon }) {
                 MonitorLiveStatsBadge()
             }
 
@@ -30,7 +16,7 @@ struct NetworkMonitorView: View {
                 .background(SeeleColors.surfaceSecondary)
 
             ScrollView {
-                switch selectedTab {
+                switch navigation.monitorTab {
                 case .overview:
                     NetworkOverviewTab()
                 case .peers:
@@ -43,7 +29,7 @@ struct NetworkMonitorView: View {
             }
         }
         .background(SeeleColors.background)
-        .focusedSceneValue(\.tabCommands, .cycling($selectedTab))
+        .focusedSceneValue(\.tabCommands, .cycling($navigation.monitorTab))
     }
 }
 
