@@ -3,21 +3,21 @@ import SeeleseekCore
 
 enum SeeleShadows {
     static let card = Shadow(
-        color: .black.opacity(0.3),
+        color: ThemedColor(light: 0x000000, dark: 0x000000, lightAlpha: 0.16, darkAlpha: 0.3).color,
         radius: 8,
         x: 0,
         y: 4
     )
 
     static let elevated = Shadow(
-        color: .black.opacity(0.4),
+        color: ThemedColor(light: 0x000000, dark: 0x000000, lightAlpha: 0.2, darkAlpha: 0.4).color,
         radius: 16,
         x: 0,
         y: 8
     )
 
     static let subtle = Shadow(
-        color: .black.opacity(0.2),
+        color: ThemedColor(light: 0x000000, dark: 0x000000, lightAlpha: 0.1, darkAlpha: 0.2).color,
         radius: 4,
         x: 0,
         y: 2
