@@ -134,6 +134,7 @@ final class SettingsState: DownloadSettingsProviding {
     private let connectAtLaunchKey = "settingsConnectAtLaunch"
     private let showInMenuBarKey = "settingsShowInMenuBar"
     private let appearanceKey = "settingsAppearance"
+    private let minimizeToMenuBarKey = "settingsMinimizeToMenuBar"
     private let notifyDownloadsKey = "settingsNotifyDownloads"
     private let notifyUploadsKey = "settingsNotifyUploads"
     private let notifyPrivateMessagesKey = "settingsNotifyPrivateMessages"
@@ -238,7 +239,12 @@ final class SettingsState: DownloadSettingsProviding {
     var showInMenuBar: Bool = true {
         didSet {
             guard !isLoading else { return }
+            // Dock-hide requires the menu bar icon; clear it when the icon goes away.
+            if !showInMenuBar && minimizeToMenuBar {
+                minimizeToMenuBar = false
+            }
             save()
+            onDockPolicyRelevantChange?()
         }
     }
     /// Dark, not system: existing installs on light Macs must not re-theme on update.
@@ -254,6 +260,25 @@ final class SettingsState: DownloadSettingsProviding {
             save()
         }
     }
+    /// When on, closing the last titled window hides the Dock icon (accessory
+    /// policy) while the menu bar extra keeps the process alive.
+    var minimizeToMenuBar: Bool = false {
+        didSet {
+            guard !isLoading else { return }
+            if minimizeToMenuBar && !showInMenuBar {
+                isLoading = true
+                minimizeToMenuBar = false
+                isLoading = false
+                return
+            }
+            save()
+            onDockPolicyRelevantChange?()
+        }
+    }
+
+    /// Fired when menu-bar / dock-hide prefs change so AppKit activation
+    /// policy can catch up. Wired by `AppState.configure()`.
+    @ObservationIgnored var onDockPolicyRelevantChange: (() -> Void)?
 
     // MARK: - Network Settings
     var listenPort: Int = 2234 {
@@ -583,6 +608,7 @@ final class SettingsState: DownloadSettingsProviding {
         showInMenuBar = true
         appearance = .dark
         connectAtLaunch = false
+        minimizeToMenuBar = false
         listenPort = 2234
         enableUPnP = true
         maxDownloadSlots = 5
@@ -672,6 +698,7 @@ final class SettingsState: DownloadSettingsProviding {
         defaults.set(downloadFolderTemplate, forKey: downloadFolderTemplateKey)
         defaults.set(launchAtLogin, forKey: launchAtLoginKey)
         defaults.set(showInMenuBar, forKey: showInMenuBarKey)
+        defaults.set(minimizeToMenuBar, forKey: minimizeToMenuBarKey)
         defaults.set(appearance.rawValue, forKey: appearanceKey)
         defaults.set(connectAtLaunch, forKey: connectAtLaunchKey)
         defaults.set(notifyDownloads, forKey: notifyDownloadsKey)
@@ -785,6 +812,12 @@ final class SettingsState: DownloadSettingsProviding {
         if let raw = defaults.string(forKey: appearanceKey),
            let value = AppAppearance(rawValue: raw) {
             appearance = value
+        }
+        if defaults.object(forKey: minimizeToMenuBarKey) != nil {
+            minimizeToMenuBar = defaults.bool(forKey: minimizeToMenuBarKey)
+        }
+        if !showInMenuBar {
+            minimizeToMenuBar = false
         }
         connectAtLaunch = defaults.bool(forKey: connectAtLaunchKey)
         if defaults.object(forKey: notifyDownloadsKey) != nil {
