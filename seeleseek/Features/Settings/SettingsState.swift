@@ -139,6 +139,7 @@ final class SettingsState: DownloadSettingsProviding {
     private let notifyUploadsKey = "settingsNotifyUploads"
     private let notifyPrivateMessagesKey = "settingsNotifyPrivateMessages"
     private let notifyWishlistKey = "settingsNotifyWishlist"
+    private let autoDownloadWishlistKey = "settingsAutoDownloadWishlist"
     private let notifyLeechersKey = "settingsNotifyLeechers"
     private let notifyOnlyInBackgroundKey = "settingsNotifyOnlyInBackground"
     private let notificationSoundNameKey = "settingsNotificationSoundName"
@@ -524,6 +525,13 @@ final class SettingsState: DownloadSettingsProviding {
             save()
         }
     }
+    /// When on, newly found wishlist matches are queued for download.
+    var autoDownloadWishlist: Bool = false {
+        didSet {
+            guard !isLoading else { return }
+            save()
+        }
+    }
     var notifyLeechers: Bool = true {
         didSet {
             guard !isLoading else { return }
@@ -639,6 +647,7 @@ final class SettingsState: DownloadSettingsProviding {
         notifyUploads = false
         notifyPrivateMessages = true
         notifyWishlist = true
+        autoDownloadWishlist = false
         notifyLeechers = true
         notifyOnlyInBackground = false
         showOnlineStatus = true
@@ -705,6 +714,7 @@ final class SettingsState: DownloadSettingsProviding {
         defaults.set(notifyUploads, forKey: notifyUploadsKey)
         defaults.set(notifyPrivateMessages, forKey: notifyPrivateMessagesKey)
         defaults.set(notifyWishlist, forKey: notifyWishlistKey)
+        defaults.set(autoDownloadWishlist, forKey: autoDownloadWishlistKey)
         defaults.set(notifyLeechers, forKey: notifyLeechersKey)
         defaults.set(notifyOnlyInBackground, forKey: notifyOnlyInBackgroundKey)
         defaults.set(selectedNotificationSound.rawValue, forKey: notificationSoundNameKey)
@@ -831,6 +841,9 @@ final class SettingsState: DownloadSettingsProviding {
         }
         if defaults.object(forKey: notifyWishlistKey) != nil {
             notifyWishlist = defaults.bool(forKey: notifyWishlistKey)
+        }
+        if defaults.object(forKey: autoDownloadWishlistKey) != nil {
+            autoDownloadWishlist = defaults.bool(forKey: autoDownloadWishlistKey)
         }
         if defaults.object(forKey: notifyLeechersKey) != nil {
             notifyLeechers = defaults.bool(forKey: notifyLeechersKey)

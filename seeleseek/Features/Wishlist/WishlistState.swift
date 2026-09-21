@@ -57,6 +57,13 @@ final class WishlistState {
     // MARK: - Network
     weak var networkClient: NetworkClient?
 
+    // MARK: - Settings
+    weak var settings: SettingsState?
+
+    /// AppState sets this so new matches can be queued without WishlistState
+    /// holding the download actor directly.
+    var queueDownload: ((SearchResult) -> Void)?
+
     private let logger = Logger(subsystem: "com.seeleseek", category: "WishlistState")
 
     // MARK: - Token Management
@@ -241,12 +248,18 @@ final class WishlistState {
         unviewedResultCount += accepted.count
 
         var announced = announcedResultKeys[itemId] ?? []
-        let newKeys = accepted.map { "\($0.username)|\($0.filename)" }.filter { !announced.contains($0) }
-        if !newKeys.isEmpty, let item = items.first(where: { $0.id == itemId }) {
-            VoiceOverAnnouncer.shared.announce("Wishlist: \(newKeys.count) new results for \(item.query)")
-            ActivityLog.shared.logWishlistResults(query: item.query, count: newKeys.count)
-            announced.formUnion(newKeys)
+        let newResults = accepted.filter { !announced.contains("\($0.username)|\($0.filename)") }
+        if !newResults.isEmpty, let item = items.first(where: { $0.id == itemId }) {
+            VoiceOverAnnouncer.shared.announce("Wishlist: \(newResults.count) new results for \(item.query)")
+            ActivityLog.shared.logWishlistResults(query: item.query, count: newResults.count)
+            announced.formUnion(newResults.map { "\($0.username)|\($0.filename)" })
             announcedResultKeys[itemId] = announced
+
+            if settings?.autoDownloadWishlist == true {
+                for result in newResults {
+                    queueDownload?(result)
+                }
+            }
         }
         logger.info("Wishlist results: +\(accepted.count) for item \(itemId) (total: \(existing.count))")
 
@@ -320,5 +333,12 @@ final class WishlistState {
         if interval < 3600 { return "\(Int(interval / 60))m ago" }
         if interval < 86400 { return "\(Int(interval / 3600))h ago" }
         return "\(Int(interval / 86400))d ago"
+    }
+
+    // MARK: - Testing
+
+    /// Maps a search token to a wishlist item without sending a FileSearch.
+    func _setTokenMappingForTest(token: UInt32, itemId: UUID) {
+        tokenToWishlistId[token] = itemId
     }
 }

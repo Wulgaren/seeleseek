@@ -13,6 +13,8 @@ struct WishlistView: View {
         VStack(spacing: 0) {
             addBar(binding: $state.wishlistState.newQuery)
             Divider().background(SeeleColors.surfaceSecondary)
+            downloadMatchesRow
+            Divider().background(SeeleColors.surfaceSecondary)
             itemsList
         }
         .background(SeeleColors.background)
@@ -34,6 +36,11 @@ struct WishlistView: View {
             }
             .disabled(wishlistState.newQuery.trimmingCharacters(in: .whitespaces).isEmpty)
         }
+    }
+
+    private var downloadMatchesRow: some View {
+        @Bindable var settings = appState.settings
+        settingsToggle("Download new matches", isOn: $settings.autoDownloadWishlist)
     }
 
     // MARK: - Items List

@@ -517,6 +517,11 @@ final class AppState {
         // Sole wiring point; must follow settings.load() or the search tab
         // starts with empty grouping + filters.
         searchState.settings = settings
+        wishlistState.settings = settings
+        wishlistState.queueDownload = { [weak self] result in
+            guard let self else { return }
+            Task { await self.downloadManager.queueDownload(from: result) }
+        }
 
         // Sync launch-at-login state from system (user may toggle in System Settings)
         settings.syncLaunchAtLoginState()

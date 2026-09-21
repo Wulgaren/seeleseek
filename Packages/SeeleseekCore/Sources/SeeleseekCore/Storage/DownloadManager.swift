@@ -435,9 +435,9 @@ public actor DownloadManager {
         // Duplicate detection. Two rows for the same (username, filename)
         // mean two pendingDownloads entries and two F-connections appending
         // to the same incomplete file — guaranteed corruption. If a live
-        // attempt already exists, no-op. If a prior attempt finished or was
-        // abandoned (.completed / .failed / .cancelled), reuse that row and
-        // re-drive it rather than spawning a parallel one.
+        // attempt already exists, no-op. Completed transfers and files
+        // already at the destination path are skipped (no re-download).
+        // Failed / cancelled rows can be re-driven.
         let dupePending = pendingDownloads.values.contains {
             $0.username == result.username && $0.filename == result.filename
         }
@@ -450,7 +450,14 @@ public actor DownloadManager {
             case .queued, .waiting, .connecting, .transferring:
                 logger.info("Skipping duplicate download (already \(existing.status.rawValue)): \(result.filename)")
                 return
-            case .completed, .failed, .cancelled:
+            case .completed:
+                logger.info("Skipping duplicate download (already completed): \(result.filename)")
+                return
+            case .failed, .cancelled:
+                if destinationFileExists(for: result.filename, username: result.username) {
+                    logger.info("Skipping duplicate download (already on disk): \(result.filename)")
+                    return
+                }
                 logger.info("Re-queuing previously \(existing.status.rawValue) download: \(result.filename)")
                 cancelledTransferIds.remove(existing.id)
                 await transferState.updateTransfer(id: existing.id) { t in
@@ -473,6 +480,11 @@ public actor DownloadManager {
             return
         }
 
+        if destinationFileExists(for: result.filename, username: result.username) {
+            logger.info("Skipping duplicate download (already on disk): \(result.filename)")
+            return
+        }
+
         let transfer = Transfer(
             username: result.username,
             filename: result.filename,
@@ -488,6 +500,12 @@ public actor DownloadManager {
         Task {
             await startDownload(transfer: transfer)
         }
+    }
+
+    /// True when the resolved download destination already has a file.
+    private func destinationFileExists(for soulseekPath: String, username: String) -> Bool {
+        let dest = computeDestPath(for: soulseekPath, username: username)
+        return FileManager.default.fileExists(atPath: dest.path)
     }
 
     // MARK: - Download Flow
@@ -3502,7 +3520,14 @@ public actor DownloadManager {
         self.transferState = tracking
     }
 
+    /// Tests need a non-nil client so `queueDownload` passes its early guard.
+    internal func _setNetworkClientForTest(_ client: NetworkClient) {
+        self._testStrongNetworkClient = client
+        self.networkClient = client
+    }
+
     private var _testStrongTransferState: (any TransferTracking)?
+    private var _testStrongNetworkClient: NetworkClient?
 
     internal func _incompleteBasenameForTest(soulseekPath: String, username: String) -> String {
         computeIncompletePath(for: soulseekPath, username: username).lastPathComponent
