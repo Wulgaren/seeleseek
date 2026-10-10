@@ -46,13 +46,16 @@ struct WishlistView: View {
 
     private var downloadMatchesRow: some View {
         @Bindable var settings = appState.settings
-        VStack(spacing: 0) {
+        // Keep this chrome to single-row controls — long captions here used to
+        // shove the whole wishlist detail up and bury the picker (#67 territory).
+        return VStack(spacing: 0) {
             settingsPicker(
                 "Download new matches",
                 selection: $settings.wishlistAutoDownloadMode,
                 options: WishlistAutoDownloadMode.allCases,
                 optionLabel: { $0.displayName }
             )
+            .help("Off, always, or only after the Mac is idle. Away mode holds matches until then.")
             if settings.wishlistAutoDownloadMode == .whenAway {
                 settingsNumberField(
                     "Away after (minutes)",
@@ -60,11 +63,11 @@ struct WishlistView: View {
                     range: 1...240,
                     placeholder: "10"
                 )
-                settingsCaption("Uses keyboard and mouse idle time. Matches found while you're here wait until you're away.")
+                .help("Keyboard and mouse idle time before matches queue.")
             }
             if settings.wishlistAutoDownloadMode != .off {
                 settingsToggle("High-quality only", isOn: $settings.wishlistAutoDownloadRequireHighQuality)
-                settingsCaption("Lossless, MP3 320 kbps, or AAC/M4A 256 kbps and up. One best copy per track (or one peer's folder per album).")
+                    .help("Lossless, MP3 320 kbps, or AAC/M4A 256+. One best copy per track (or one peer folder per album).")
             }
         }
     }

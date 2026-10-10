@@ -208,10 +208,10 @@ private struct SearchResultRowInteractions: ViewModifier {
     private func accessibilityTraits(isQueued: Bool) -> AccessibilityTraits {
         var traits: AccessibilityTraits = []
         if !isQueued {
-            traits.insert(.isButton)
+            traits.formUnion(.isButton)
         }
         if isSelectionMode && isSelected {
-            traits.insert(.isSelected)
+            traits.formUnion(.isSelected)
         }
         return traits
     }
