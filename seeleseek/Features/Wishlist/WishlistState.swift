@@ -62,7 +62,25 @@ final class WishlistState {
 
     /// AppState sets this so new matches can be queued without WishlistState
     /// holding the download actor directly.
-    var queueDownload: ((SearchResult) -> Void)?
+    @ObservationIgnored var queueDownload: ((SearchResult) -> Void)?
+
+    /// True when any transfer already owns this leaf filename (queued / active / completed).
+    @ObservationIgnored var isTrackOwned: ((String) -> Bool)?
+
+    /// Idle clock for "Only when I'm away". Tests inject a fixed provider.
+    @ObservationIgnored var idleTimeProvider: any IdleTimeProviding = {
+        #if os(macOS)
+        CGEventIdleTimeProvider()
+        #else
+        FixedIdleTimeProvider(secondsSinceLastInput: .greatestFiniteMagnitude)
+        #endif
+    }()
+
+    /// Best candidates waiting for away-mode idle (track key → result).
+    @ObservationIgnored private var pendingAutoDownloads: [String: SearchResult] = [:]
+    /// Track keys already handed to `queueDownload` this session.
+    @ObservationIgnored private var queuedAutoDownloadKeys: Set<String> = []
+    @ObservationIgnored private var awayFlushTask: Task<Void, Never>?
 
     private let logger = Logger(subsystem: "com.seeleseek", category: "WishlistState")
 
@@ -255,11 +273,7 @@ final class WishlistState {
             announced.formUnion(newResults.map { "\($0.username)|\($0.filename)" })
             announcedResultKeys[itemId] = announced
 
-            if settings?.autoDownloadWishlist == true {
-                for result in newResults {
-                    queueDownload?(result)
-                }
-            }
+            considerAutoDownload(Array(newResults))
         }
         logger.info("Wishlist results: +\(accepted.count) for item \(itemId) (total: \(existing.count))")
 
@@ -278,6 +292,100 @@ final class WishlistState {
 
     func markResultsViewed() {
         unviewedResultCount = 0
+    }
+
+    // MARK: - Auto-download
+
+    /// Selects best copies from `results` (plus anything still pending),
+    /// stages them, and flushes when the current mode allows.
+    func considerAutoDownload(_ results: [SearchResult]) {
+        guard let settings, settings.wishlistAutoDownloadMode != .off else { return }
+
+        let pool = Array(pendingAutoDownloads.values) + results
+        var owned = queuedAutoDownloadKeys
+        for result in pool {
+            let key = WishlistAutoDownloadPlanner.trackKey(for: result)
+            if isTrackOwned?(key) == true {
+                owned.insert(key)
+            }
+        }
+
+        let selected = WishlistAutoDownloadPlanner.select(
+            from: pool,
+            ownedTrackKeys: owned,
+            requireQualityFloor: settings.wishlistAutoDownloadRequireHighQuality
+        )
+        pendingAutoDownloads = Dictionary(
+            uniqueKeysWithValues: selected.map { (WishlistAutoDownloadPlanner.trackKey(for: $0), $0) }
+        )
+
+        flushAutoDownloadsIfAllowed()
+    }
+
+    /// Re-check idle and drain the pending queue. Safe to call from tests.
+    func flushAutoDownloadsIfAllowed() {
+        guard let settings else { return }
+        switch settings.wishlistAutoDownloadMode {
+        case .off:
+            pendingAutoDownloads.removeAll()
+            stopAwayFlushLoop()
+            return
+        case .always:
+            drainPendingAutoDownloads()
+            stopAwayFlushLoop()
+        case .whenAway:
+            if isUserAway(idleMinutes: settings.wishlistAutoDownloadIdleMinutes) {
+                drainPendingAutoDownloads()
+            }
+            if pendingAutoDownloads.isEmpty {
+                stopAwayFlushLoop()
+            } else {
+                startAwayFlushLoop()
+            }
+        }
+    }
+
+    private func drainPendingAutoDownloads() {
+        guard !pendingAutoDownloads.isEmpty else { return }
+        let batch = pendingAutoDownloads.values.sorted {
+            $0.filename.localizedStandardCompare($1.filename) == .orderedAscending
+        }
+        pendingAutoDownloads.removeAll()
+
+        for result in batch {
+            let key = WishlistAutoDownloadPlanner.trackKey(for: result)
+            if queuedAutoDownloadKeys.contains(key) { continue }
+            if isTrackOwned?(key) == true {
+                queuedAutoDownloadKeys.insert(key)
+                continue
+            }
+            queueDownload?(result)
+            queuedAutoDownloadKeys.insert(key)
+            logger.info("Wishlist auto-download queued: \(result.displayFilename) from \(result.username)")
+        }
+    }
+
+    private func isUserAway(idleMinutes: Int) -> Bool {
+        let threshold = TimeInterval(max(idleMinutes, 1)) * 60
+        return idleTimeProvider.secondsSinceLastInput >= threshold
+    }
+
+    private func startAwayFlushLoop() {
+        guard awayFlushTask == nil else { return }
+        awayFlushTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled else { break }
+                await MainActor.run {
+                    self?.flushAutoDownloadsIfAllowed()
+                }
+            }
+        }
+    }
+
+    private func stopAwayFlushLoop() {
+        awayFlushTask?.cancel()
+        awayFlushTask = nil
     }
 
     // MARK: - Scheduler

@@ -95,6 +95,21 @@ enum DownloadFolderFormat: String, CaseIterable {
 
 }
 
+/// When wishlist matches should be queued for download.
+enum WishlistAutoDownloadMode: String, CaseIterable, Sendable {
+    case off
+    case always
+    case whenAway
+
+    var displayName: String {
+        switch self {
+        case .off: "Off"
+        case .always: "Always"
+        case .whenAway: "Only when I'm away"
+        }
+    }
+}
+
 /// Search-result filter prefs that survive relaunch. Kept separate from
 /// `SearchState` so Settings can load them before the search tab wires up.
 /// New fields must be optional: synthesized Codable ignores the defaults
@@ -139,7 +154,11 @@ final class SettingsState: DownloadSettingsProviding {
     private let notifyUploadsKey = "settingsNotifyUploads"
     private let notifyPrivateMessagesKey = "settingsNotifyPrivateMessages"
     private let notifyWishlistKey = "settingsNotifyWishlist"
+    /// Legacy bool from the first auto-download pass; migrated into `wishlistAutoDownloadMode`.
     private let autoDownloadWishlistKey = "settingsAutoDownloadWishlist"
+    private let wishlistAutoDownloadModeKey = "settingsWishlistAutoDownloadMode"
+    private let wishlistAutoDownloadIdleMinutesKey = "settingsWishlistAutoDownloadIdleMinutes"
+    private let wishlistAutoDownloadRequireHighQualityKey = "settingsWishlistAutoDownloadRequireHighQuality"
     private let notifyLeechersKey = "settingsNotifyLeechers"
     private let notifyOnlyInBackgroundKey = "settingsNotifyOnlyInBackground"
     private let notificationSoundNameKey = "settingsNotificationSoundName"
@@ -525,8 +544,28 @@ final class SettingsState: DownloadSettingsProviding {
             save()
         }
     }
-    /// When on, newly found wishlist matches are queued for download.
-    var autoDownloadWishlist: Bool = false {
+    /// When wishlist matches should auto-queue downloads.
+    var wishlistAutoDownloadMode: WishlistAutoDownloadMode = .off {
+        didSet {
+            guard !isLoading else { return }
+            save()
+        }
+    }
+    /// Idle minutes before "Only when I'm away" starts queuing. Default 10.
+    var wishlistAutoDownloadIdleMinutes: Int = 10 {
+        didSet {
+            guard !isLoading else { return }
+            let clamped = min(max(wishlistAutoDownloadIdleMinutes, 1), 240)
+            if clamped != wishlistAutoDownloadIdleMinutes {
+                isLoading = true
+                wishlistAutoDownloadIdleMinutes = clamped
+                isLoading = false
+            }
+            save()
+        }
+    }
+    /// Lossless, MP3 ≥ 320, or AAC/M4A ≥ 256. Default on.
+    var wishlistAutoDownloadRequireHighQuality: Bool = true {
         didSet {
             guard !isLoading else { return }
             save()
@@ -647,7 +686,9 @@ final class SettingsState: DownloadSettingsProviding {
         notifyUploads = false
         notifyPrivateMessages = true
         notifyWishlist = true
-        autoDownloadWishlist = false
+        wishlistAutoDownloadMode = .off
+        wishlistAutoDownloadIdleMinutes = 10
+        wishlistAutoDownloadRequireHighQuality = true
         notifyLeechers = true
         notifyOnlyInBackground = false
         showOnlineStatus = true
@@ -714,7 +755,9 @@ final class SettingsState: DownloadSettingsProviding {
         defaults.set(notifyUploads, forKey: notifyUploadsKey)
         defaults.set(notifyPrivateMessages, forKey: notifyPrivateMessagesKey)
         defaults.set(notifyWishlist, forKey: notifyWishlistKey)
-        defaults.set(autoDownloadWishlist, forKey: autoDownloadWishlistKey)
+        defaults.set(wishlistAutoDownloadMode.rawValue, forKey: wishlistAutoDownloadModeKey)
+        defaults.set(wishlistAutoDownloadIdleMinutes, forKey: wishlistAutoDownloadIdleMinutesKey)
+        defaults.set(wishlistAutoDownloadRequireHighQuality, forKey: wishlistAutoDownloadRequireHighQualityKey)
         defaults.set(notifyLeechers, forKey: notifyLeechersKey)
         defaults.set(notifyOnlyInBackground, forKey: notifyOnlyInBackgroundKey)
         defaults.set(selectedNotificationSound.rawValue, forKey: notificationSoundNameKey)
@@ -842,8 +885,18 @@ final class SettingsState: DownloadSettingsProviding {
         if defaults.object(forKey: notifyWishlistKey) != nil {
             notifyWishlist = defaults.bool(forKey: notifyWishlistKey)
         }
-        if defaults.object(forKey: autoDownloadWishlistKey) != nil {
-            autoDownloadWishlist = defaults.bool(forKey: autoDownloadWishlistKey)
+        if let modeRaw = defaults.string(forKey: wishlistAutoDownloadModeKey),
+           let mode = WishlistAutoDownloadMode(rawValue: modeRaw) {
+            wishlistAutoDownloadMode = mode
+        } else if defaults.object(forKey: autoDownloadWishlistKey) != nil {
+            // Migrate the original on/off toggle.
+            wishlistAutoDownloadMode = defaults.bool(forKey: autoDownloadWishlistKey) ? .always : .off
+        }
+        if defaults.object(forKey: wishlistAutoDownloadIdleMinutesKey) != nil {
+            wishlistAutoDownloadIdleMinutes = defaults.integer(forKey: wishlistAutoDownloadIdleMinutesKey)
+        }
+        if defaults.object(forKey: wishlistAutoDownloadRequireHighQualityKey) != nil {
+            wishlistAutoDownloadRequireHighQuality = defaults.bool(forKey: wishlistAutoDownloadRequireHighQualityKey)
         }
         if defaults.object(forKey: notifyLeechersKey) != nil {
             notifyLeechers = defaults.bool(forKey: notifyLeechersKey)

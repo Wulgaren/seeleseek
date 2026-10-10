@@ -522,6 +522,9 @@ final class AppState {
             guard let self else { return }
             Task { await self.downloadManager.queueDownload(from: result) }
         }
+        wishlistState.isTrackOwned = { [weak self] leaf in
+            self?.transferState.hasBlockingDownload(forLeafName: leaf) ?? false
+        }
 
         // Sync launch-at-login state from system (user may toggle in System Settings)
         settings.syncLaunchAtLoginState()

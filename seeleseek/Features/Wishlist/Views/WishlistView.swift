@@ -18,6 +18,12 @@ struct WishlistView: View {
             itemsList
         }
         .background(SeeleColors.background)
+        .onChange(of: appState.settings.wishlistAutoDownloadMode) { _, _ in
+            wishlistState.flushAutoDownloadsIfAllowed()
+        }
+        .onChange(of: appState.settings.wishlistAutoDownloadIdleMinutes) { _, _ in
+            wishlistState.flushAutoDownloadsIfAllowed()
+        }
     }
 
     // MARK: - Add Bar
@@ -40,7 +46,27 @@ struct WishlistView: View {
 
     private var downloadMatchesRow: some View {
         @Bindable var settings = appState.settings
-        settingsToggle("Download new matches", isOn: $settings.autoDownloadWishlist)
+        VStack(spacing: 0) {
+            settingsPicker(
+                "Download new matches",
+                selection: $settings.wishlistAutoDownloadMode,
+                options: WishlistAutoDownloadMode.allCases,
+                optionLabel: { $0.displayName }
+            )
+            if settings.wishlistAutoDownloadMode == .whenAway {
+                settingsNumberField(
+                    "Away after (minutes)",
+                    value: $settings.wishlistAutoDownloadIdleMinutes,
+                    range: 1...240,
+                    placeholder: "10"
+                )
+                settingsCaption("Uses keyboard and mouse idle time. Matches found while you're here wait until you're away.")
+            }
+            if settings.wishlistAutoDownloadMode != .off {
+                settingsToggle("High-quality only", isOn: $settings.wishlistAutoDownloadRequireHighQuality)
+                settingsCaption("Lossless, MP3 320 kbps, or AAC/M4A 256 kbps and up. One best copy per track (or one peer's folder per album).")
+            }
+        }
     }
 
     // MARK: - Items List

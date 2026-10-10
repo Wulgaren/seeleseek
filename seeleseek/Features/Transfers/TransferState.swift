@@ -465,6 +465,21 @@ final class TransferState: TransferTracking {
         return status != .completed && status != .cancelled
     }
 
+    /// True when any peer already has this leaf filename queued, in flight, or completed.
+    /// Wishlist auto-download uses this so the same track is not pulled from a second peer.
+    func hasBlockingDownload(forLeafName leaf: String) -> Bool {
+        let key = leaf.lowercased()
+        return downloads.contains { transfer in
+            guard transfer.displayFilename.lowercased() == key else { return false }
+            switch transfer.status {
+            case .queued, .waiting, .connecting, .transferring, .completed:
+                return true
+            case .failed, .cancelled:
+                return false
+            }
+        }
+    }
+
     func addDownload(_ transfer: Transfer) {
         downloads.insert(transfer, at: 0)
         persistTransfer(transfer)
