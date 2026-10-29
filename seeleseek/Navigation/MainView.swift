@@ -47,6 +47,17 @@ struct MainView: View {
                 dismissWindow(id: "update-prompt")
             }
         }
+        .alert(
+            "seeleseek quit unexpectedly",
+            isPresented: Bindable(appState.crashReportState).showPrompt,
+            presenting: appState.crashReportState.pendingReport
+        ) { report in
+            Button("Report on GitHub") { appState.crashReportState.reportOnGitHub(report) }
+            Button("Show in Finder") { appState.crashReportState.revealInFinder(report) }
+            Button("Not Now", role: .cancel) {}
+        } message: { report in
+            Text("A crash report from \(report.date.formatted(date: .abbreviated, time: .shortened)) is available. Reporting opens a new GitHub issue with a summary and copies the full report to your clipboard. Nothing is sent automatically.")
+        }
         #endif
         .alert("Server Message", isPresented: Bindable(appState).showAdminMessageAlert) {
             Button("OK", role: .cancel) {}
