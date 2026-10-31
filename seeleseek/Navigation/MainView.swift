@@ -14,6 +14,9 @@ struct MainView: View {
     #endif
 
     var body: some View {
+        #if DEBUG
+        let _ = { if SynthDiag.logChanges { Self._printChanges() } }()
+        #endif
         Group {
             #if os(macOS)
             macOSLayout
@@ -21,7 +24,7 @@ struct MainView: View {
             iOSLayout
             #endif
         }
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(appState.settings.appearance.colorScheme)
         #if os(macOS)
         .onChange(of: appState.updateState.showUpdatePrompt) { _, show in
             if show {
@@ -43,6 +46,17 @@ struct MainView: View {
                 // no update to show, so any restored window is stale.
                 dismissWindow(id: "update-prompt")
             }
+        }
+        .alert(
+            "seeleseek quit unexpectedly",
+            isPresented: Bindable(appState.crashReportState).showPrompt,
+            presenting: appState.crashReportState.pendingReport
+        ) { report in
+            Button("Report on GitHub") { appState.crashReportState.reportOnGitHub(report) }
+            Button("Show in Finder") { appState.crashReportState.revealInFinder(report) }
+            Button("Not Now", role: .cancel) {}
+        } message: { report in
+            Text("A crash report from \(report.date.formatted(date: .abbreviated, time: .shortened)) is available. Reporting opens a new GitHub issue with a summary and copies the full report to your clipboard. Nothing is sent automatically.")
         }
         #endif
         .alert("Server Message", isPresented: Bindable(appState).showAdminMessageAlert) {
@@ -124,16 +138,18 @@ struct MainView: View {
 
     @ViewBuilder
     private var detailView: some View {
-        // Show login when disconnected OR when there's a login error (so user can retry).
+        // Login stays up until the session is actually established:
+        // `.connecting` is only ever user-initiated (auto-reconnect
+        // publishes `.reconnecting`), so leaving for the app view on it
+        // meant a rejected password flashed the app and bounced back.
         // `isReapplyingSettings` suppresses the flash when something like a port
         // change is intentionally bouncing the connection — the user should keep
         // seeing whatever they were looking at, not the login screen.
-        if (appState.connection.connectionStatus == .disconnected ||
-            appState.connection.connectionStatus == .error) &&
+        if [.disconnected, .connecting, .error].contains(appState.connection.connectionStatus) &&
            !appState.connection.isReapplyingSettings {
             LoginView()
         } else {
-            switch appState.sidebarSelection {
+            switch appState.navigation.sidebarSelection {
             case .search:
                 SearchView()
             case .wishlists:
@@ -153,7 +169,7 @@ struct MainView: View {
             case .networkMonitor:
                 NetworkMonitorView()
             case .settings:
-                SettingsView()
+                SettingsView(selection: Bindable(appState.navigation).settingsTab)
             case nil:
                 SearchView()
             }
@@ -186,7 +202,9 @@ struct PlaceholderView: View {
     }
 }
 
+#if DEBUG
 #Preview {
     MainView()
         .environment(\.appState, AppState())
 }
+#endif

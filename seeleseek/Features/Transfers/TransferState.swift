@@ -259,14 +259,6 @@ final class TransferState: TransferTracking {
         downloads.filter { $0.status == .queued || $0.status == .waiting }
     }
 
-    var completedDownloads: [Transfer] {
-        downloads.filter { $0.status == .completed }
-    }
-
-    var failedDownloads: [Transfer] {
-        downloads.filter { $0.status == .failed || $0.status == .cancelled }
-    }
-
     var hasActiveTransfers: Bool {
         !activeDownloads.isEmpty || !activeUploads.isEmpty
     }
@@ -486,7 +478,7 @@ final class TransferState: TransferTracking {
         return probe == after
     }
 
-    func updateTransfer(id: UUID, update: (inout Transfer) -> Void) {
+    func updateTransfer(id: UUID, update: @Sendable (inout Transfer) -> Void) {
         if let index = downloads.firstIndex(where: { $0.id == id }) {
             let before = downloads[index]
             var transfer = before
@@ -537,7 +529,7 @@ final class TransferState: TransferTracking {
 
     /// Invoked when a user-visible action takes a transfer out of a
     /// retriable state (cancel, remove, manual retry). Set by AppState to
-    /// `downloadManager.cancelRetry(transferId:)` so any `pendingRetries`
+    /// `downloadManager.cancelRetry(transferId:)` so any scheduler
     /// Task that was sleeping for the next backoff tick is dropped
     /// immediately instead of waking up to 30 min later and finding it
     /// has no work to do. The status-guard inside the Task already makes
@@ -560,6 +552,37 @@ final class TransferState: TransferTracking {
         }
         onCancelRequested?(id, isDownload)
         onDownloadTerminated?(id)
+    }
+
+    var hasCancellableDownloads: Bool {
+        downloads.contains(where: \.canCancel)
+    }
+
+    func cancelAllDownloads() {
+        cancelDownloads { _ in true }
+    }
+
+    var hasCancellableUploads: Bool {
+        uploads.contains(where: \.canCancel)
+    }
+
+    func cancelAllUploads() {
+        for id in uploads.filter(\.canCancel).map(\.id) {
+            cancelTransfer(id: id)
+        }
+    }
+
+    func cancelFolder(of transfer: Transfer) {
+        cancelDownloads {
+            $0.username == transfer.username && $0.folderPath == transfer.folderPath
+        }
+    }
+
+    private func cancelDownloads(where matches: (Transfer) -> Bool) {
+        let ids = downloads.filter { $0.canCancel && matches($0) }.map(\.id)
+        for id in ids {
+            cancelTransfer(id: id)
+        }
     }
 
     func retryTransfer(id: UUID) {
@@ -621,10 +644,6 @@ final class TransferState: TransferTracking {
         Task {
             try? await TransferRepository.deleteFailed()
         }
-    }
-
-    func moveDownload(from source: IndexSet, to destination: Int) {
-        downloads.move(fromOffsets: source, toOffset: destination)
     }
 
     func moveDownloadToTop(id: UUID) {

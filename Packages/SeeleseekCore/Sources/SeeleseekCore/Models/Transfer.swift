@@ -107,10 +107,6 @@ public struct Transfer: Identifiable, Hashable, Sendable {
         return Double(bytesTransferred) / Double(size)
     }
 
-    public var formattedProgress: String {
-        "\(bytesTransferred.formattedBytes) / \(size.formattedBytes)"
-    }
-
     public var formattedSpeed: String {
         speed.formattedSpeed
     }
@@ -141,6 +137,10 @@ public struct Transfer: Identifiable, Hashable, Sendable {
             // The peer may have dropped our queue slot (peer restarts lose
             // it). Uploads in .waiting are the peer's queue, not ours.
             return direction == .download
+        case .queued:
+            // An upload the peer answered "Queued" sits in a retry backoff
+            // of up to 30 min; let the user fire it now.
+            return direction == .upload && nextRetryAt != nil
         default:
             return false
         }

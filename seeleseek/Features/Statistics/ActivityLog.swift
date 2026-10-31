@@ -39,6 +39,8 @@ final class ActivityLog: ActivityLogging {
         case uploadStarted
         case uploadCompleted
         case chatMessage
+        case wishlistResult
+        case leechDetected
         case error
         case info
 
@@ -53,6 +55,8 @@ final class ActivityLog: ActivityLogging {
             case .uploadStarted: "arrow.up.circle"
             case .uploadCompleted: "arrow.up.circle.fill"
             case .chatMessage: "bubble.left.fill"
+            case .wishlistResult: "star.fill"
+            case .leechDetected: "person.crop.circle.badge.exclamationmark"
             case .error: "exclamationmark.triangle.fill"
             case .info: "info.circle.fill"
             }
@@ -71,6 +75,8 @@ final class ActivityLog: ActivityLogging {
             case .uploadStarted: "Upload started"
             case .uploadCompleted: "Upload completed"
             case .chatMessage: "Chat message"
+            case .wishlistResult: "Wishlist match"
+            case .leechDetected: "Leech detected"
             case .error: "Error"
             case .info: "Info"
             }
@@ -86,8 +92,10 @@ final class ActivityLog: ActivityLogging {
                 return SeeleColors.info
             case .downloadStarted, .uploadStarted:
                 return SeeleColors.accent
-            case .chatMessage:
+            case .chatMessage, .leechDetected:
                 return SeeleColors.warning
+            case .wishlistResult:
+                return SeeleColors.accent
             case .error:
                 return SeeleColors.error
             case .info:
@@ -269,5 +277,10 @@ final class ActivityLog: ActivityLogging {
 
     func logDistributedSearch(query: String, matchCount: Int) {
         log(.searchResult, title: "\(matchCount) shared for \"\(query)\"")
+    }
+
+    func logWishlistResults(query: String, count: Int) {
+        let noun = count == 1 ? "result" : "results"
+        log(.wishlistResult, title: "\(count) new \(noun) for \"\(query)\"")
     }
 }

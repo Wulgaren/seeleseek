@@ -5,19 +5,33 @@ struct LoginView: View {
     @Environment(\.appState) private var appState
 
     var body: some View {
-        @Bindable var connectionState = appState.connection
+        ViewThatFits(in: .vertical) {
+            content(showsLogo: true)
+            content(showsLogo: false)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(SeeleColors.background)
+        .onAppear {
+            loadSavedCredentials()
+        }
+    }
 
-        VStack(spacing: 0) {
+    private func content(showsLogo: Bool) -> some View {
+        @Bindable var connectionState = appState.connection
+        @Bindable var settings = appState.settings
+
+        return VStack(spacing: 0) {
             Spacer()
 
             VStack(spacing: SeeleSpacing.xxl) {
                 // Logo / Title
                 VStack(spacing: SeeleSpacing.md) {
-                    Image(nsImage: .gsgaag2)
-                        .renderingMode(.template)
-                        .accessibilityHidden(true)
-
-                    .foregroundStyle(SeeleColors.accent)
+                    if showsLogo {
+                        Image(nsImage: .gsgaag2)
+                            .renderingMode(.template)
+                            .foregroundStyle(SeeleColors.accent)
+                            .accessibilityHidden(true)
+                    }
 
                     Text("seeleseek")
                         .font(SeeleTypography.logo)
@@ -63,6 +77,13 @@ struct LoginView: View {
                         .font(SeeleTypography.subheadline)
                         .foregroundStyle(SeeleColors.textSecondary)
 
+
+                    Toggle("Connect automatically at launch", isOn: $settings.connectAtLaunch)
+                        .toggleStyle(SeeleToggleStyle())
+                        .font(SeeleTypography.subheadline)
+                        .foregroundStyle(SeeleColors.textSecondary)
+                        .disabled(!connectionState.rememberCredentials)
+
                     if let error = appState.connection.errorMessage {
                         HStack(spacing: SeeleSpacing.sm) {
                             Image(systemName: "exclamationmark.triangle.fill")
@@ -85,7 +106,7 @@ struct LoginView: View {
                         isLoading: appState.connection.connectionStatus == .connecting
                     ) {
                         Task {
-                            await connect()
+                            await appState.connect()
                         }
                     }
                     .disabled(!appState.connection.isLoginValid)
@@ -106,34 +127,14 @@ struct LoginView: View {
             }
             .padding(.bottom, SeeleSpacing.xl)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(SeeleColors.background)
-        .onAppear {
-            loadSavedCredentials()
-        }
-    }
-
-    private func connect() async {
-        appState.connection.setConnecting()
-
-        // Connection-status handling is wired app-wide in
-        // AppState.wireNetworkClient() — this stays form-local.
-        appState.networkClient.acceptDistributedChildren = appState.settings.respondToSearches
-
-        await appState.networkClient.connect(
-            server: ServerConnection.defaultHost,
-            port: ServerConnection.defaultPort,
-            username: appState.connection.loginUsername,
-            password: appState.connection.loginPassword,
-            preferredListenPort: UInt16(appState.settings.listenPort)
-        )
-
-        if let error = appState.networkClient.connectionError {
-            appState.connection.setError(error)
-        }
     }
 
     private func loadSavedCredentials() {
+        #if DEBUG
+        // The synthetic driver never logs in, and a rebuilt binary's
+        // Keychain prompt blocks the main thread here before it starts.
+        if SyntheticSearchDriver.isEnabled { return }
+        #endif
         // Only prefill when both fields are empty — the view re-appears
         // (e.g. after a failed attempt) and reloading would clobber
         // whatever the user has typed.
@@ -145,6 +146,7 @@ struct LoginView: View {
     }
 }
 
+#if DEBUG
 #Preview("Login - Empty") {
     LoginView()
         .environment(\.appState, AppState())
@@ -159,4 +161,5 @@ struct LoginView: View {
     return LoginView()
         .environment(\.appState, state)
 }
+#endif
 

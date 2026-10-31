@@ -31,6 +31,9 @@ struct SearchView: View {
     }
 
     var body: some View {
+        #if DEBUG
+        let _ = { if SynthDiag.logChanges { Self._printChanges() } }()
+        #endif
         @Bindable var state = appState
         VStack(spacing: 0) {
             searchBar(binding: $state.searchState.searchQuery)
@@ -61,7 +64,7 @@ struct SearchView: View {
         .onAppear {
             consumePendingSearchFocus()
         }
-        .onChange(of: appState.searchFieldFocusPending) { _, pending in
+        .onChange(of: appState.navigation.searchFieldFocusPending) { _, pending in
             if pending { consumePendingSearchFocus() }
         }
     }
@@ -83,8 +86,8 @@ struct SearchView: View {
     }
 
     private func consumePendingSearchFocus() {
-        guard appState.searchFieldFocusPending else { return }
-        appState.searchFieldFocusPending = false
+        guard appState.navigation.searchFieldFocusPending else { return }
+        appState.navigation.searchFieldFocusPending = false
         // A view appearing in this same update cannot take focus until the next runloop.
         DispatchQueue.main.async {
             isSearchFocused = true
@@ -198,38 +201,17 @@ struct SearchView: View {
             RoundedRectangle(cornerRadius: SeeleSpacing.radiusMD, style: .continuous)
                 .stroke(SeeleColors.surfaceSecondary, lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
+        .shadow(color: SeeleColors.shadowColorStrong, radius: 8, y: 4)
     }
 
     private var searchTabs: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: SeeleSpacing.xs) {
-                    ForEach(Array(searchState.searches.enumerated()), id: \.element.id) { index, search in
-                        searchTab(search: search, index: index)
-                            .id(search.id)
-                    }
-                }
-                .padding(.horizontal, SeeleSpacing.lg)
-                .padding(.vertical, SeeleSpacing.sm)
-            }
-            .background(SeeleColors.surface.opacity(0.3))
-            .focusable()
-            .focused($isTabStripFocused)
-            .focusEffectDisabled()
-            .onMoveCommand { direction in
-                switch direction {
-                case .left: searchState.selectSearch(at: searchState.selectedSearchIndex - 1)
-                case .right: searchState.selectSearch(at: searchState.selectedSearchIndex + 1)
-                default: break
-                }
-            }
-            .onChange(of: searchState.selectedSearchIndex) { _, index in
-                guard searchState.searches.indices.contains(index) else { return }
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    proxy.scrollTo(searchState.searches[index].id)
-                }
-            }
+        ScrollingTabStrip(
+            items: searchState.searches,
+            selectedIndex: searchState.selectedSearchIndex,
+            isFocused: $isTabStripFocused,
+            select: { searchState.selectSearch(at: $0) }
+        ) { index, search in
+            searchTab(search: search, index: index)
         }
     }
 
@@ -413,65 +395,30 @@ struct SearchView: View {
                             .accessibilityLabel("Select results")
                             .accessibilityValue(searchState.isSelectionMode ? "on" : "off")
 
-                            Menu {
-                                ForEach(SearchState.SortOrder.allCases, id: \.self) { order in
-                                    Button {
-                                        searchState.sortOrder = order
-                                    } label: {
-                                        HStack {
-                                            Text(order.rawValue)
-                                            if searchState.sortOrder == order {
-                                                Image(systemName: "checkmark")
-                                            }
-                                        }
-                                    }
-                                }
-                            } label: {
-                                HStack(spacing: SeeleSpacing.xs) {
-                                    Text("Sort: \(searchState.sortOrder.rawValue)")
-                                        .font(SeeleTypography.caption)
-                                    Image(systemName: "chevron.down")
-                                        .font(.system(size: SeeleSpacing.iconSizeXS))
-                                }
-                                .foregroundStyle(SeeleColors.textSecondary)
-                            }
-                            .buttonStyle(.plain)
-                            .menuIndicator(.hidden)
+                            SearchSortMenu(searchState: searchState)
 
-                            if search.isSearching {
-                                ProgressView()
-                                    .scaleEffect(0.6)
+                            ZStack {
+                                if search.isSearching {
+                                    ProgressView()
+                                        .scaleEffect(0.5)
+                                }
                             }
+                            .frame(width: SeeleSpacing.iconSizeSmall, height: SeeleSpacing.iconSizeSmall)
                         }
                     }
                 }
             }
             .background(SeeleColors.surface.opacity(0.3))
 
-            // Results list
+            // Not LazyVStack/List: under 120Hz flicks those dropped ~33/~25
+            // frames per 5s, the hosted table ~9. See SearchResultsHostedTableView.
             ZStack(alignment: .bottom) {
-                ScrollView {
-                    LazyVStack(spacing: SeeleSpacing.dividerSpacing) {
-                        if searchState.isGrouped {
-                            ForEach(searchState.displayItems) { item in
-                                SearchResultListItemView(item: item)
-                            }
-                        } else {
-                            ForEach(searchState.filteredResults) { result in
-                                SearchResultRow(
-                                    result: result,
-                                    isSelectionMode: searchState.isSelectionMode,
-                                    isSelected: searchState.selectedResults.contains(result.id),
-                                    onToggleSelection: {
-                                        searchState.toggleSelection(result.id)
-                                    }
-                                )
-                            }
-                        }
-                    }
-                    // Add bottom padding when action bar is visible
-                    .padding(.bottom, searchState.isSelectionMode ? 60 : 0)
-                }
+                SearchResultsHostedTableView(
+                    items: searchState.displayItems,
+                    bottomInset: searchState.isSelectionMode ? 60 : 0
+                )
+                // Nested hosting views inherit this environment.
+                .modifier(ResultsHoverSuppression())
 
                 // Floating action bar
                 if searchState.isSelectionMode {
@@ -518,7 +465,7 @@ struct SearchView: View {
         .padding(.vertical, SeeleSpacing.sm)
         .background(
             SeeleColors.surface
-                .shadow(.drop(color: .black.opacity(0.3), radius: 8, y: -2))
+                .shadow(.drop(color: SeeleColors.shadowColorStrong, radius: 8, y: -2))
         )
     }
 
@@ -528,7 +475,7 @@ struct SearchView: View {
 
         for result in results {
             if !appState.transferState.isFileQueued(filename: result.filename, username: result.username) {
-                appState.downloadManager.queueDownload(from: result)
+                Task { await appState.downloadManager.queueDownload(from: result) }
             }
         }
 
@@ -587,8 +534,20 @@ struct SearchView: View {
     }
 }
 
+/// Reads `isListScrolling` in its own body so each scroll start and stop
+/// re-evaluates this node instead of all of `SearchView`.
+private struct ResultsHoverSuppression: ViewModifier {
+    @Environment(\.appState) private var appState
+
+    func body(content: Content) -> some View {
+        content.environment(\.rowHoverSuppressed, appState.searchState.isListScrolling)
+    }
+}
+
+#if DEBUG
 #Preview {
     SearchView()
         .environment(\.appState, AppState())
         .frame(width: 800, height: 600)
 }
+#endif

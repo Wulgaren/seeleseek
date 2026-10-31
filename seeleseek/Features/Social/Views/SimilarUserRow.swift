@@ -91,15 +91,16 @@ struct SimilarUserRow: View {
 
     private func browseFiles() {
         appState.browseState.browseUser(username)
-        appState.sidebarSelection = .browse
+        appState.navigation.navigate(to: .browse)
     }
 
     private func startChat() {
         appState.chatState.selectPrivateChat(username)
-        appState.sidebarSelection = .chat
+        appState.navigation.navigate(to: .chat)
     }
 }
 
+#if DEBUG
 #Preview {
     VStack {
         SimilarUserRow(username: "jazzfan42", rating: 85)
@@ -109,3 +110,4 @@ struct SimilarUserRow: View {
     .environment(\.appState, AppState())
     .background(SeeleColors.background)
 }
+#endif

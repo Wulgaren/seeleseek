@@ -25,11 +25,16 @@ struct NotificationSettingsSection: View {
                     .disabled(!settings.enableNotifications)
                 settingsToggle("Private messages", isOn: $settings.notifyPrivateMessages)
                     .disabled(!settings.enableNotifications)
+                settingsToggle("Wishlist matches", isOn: $settings.notifyWishlist)
+                    .disabled(!settings.enableNotifications)
+                settingsToggle("Leechers detected", isOn: $settings.notifyLeechers)
+                    .disabled(!settings.enableNotifications)
             }
         }
     }
 }
 
+#if DEBUG
 #Preview {
     ScrollView {
         NotificationSettingsSection(settings: SettingsState())
@@ -38,3 +43,4 @@ struct NotificationSettingsSection: View {
     .frame(width: 500, height: 400)
     .background(SeeleColors.background)
 }
+#endif

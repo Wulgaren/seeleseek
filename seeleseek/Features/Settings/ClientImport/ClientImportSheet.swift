@@ -2,15 +2,64 @@ import SwiftUI
 import AppKit
 import SeeleseekCore
 
-/// One-shot migration of settings from a Nicotine+ install. Finds the
-/// config, shows the found values with checkboxes, and applies only the
-/// selected groups.
-struct NicotineImportSheet: View {
+/// The clients SeeleSeek can migrate settings from.
+enum ClientImportSource: String, Identifiable {
+    case nicotine
+    case soulseekQt
+
+    var id: String { rawValue }
+
+    var name: String {
+        switch self {
+        case .nicotine: "Nicotine+"
+        case .soulseekQt: "SoulseekQt"
+        }
+    }
+
+    /// Where the config normally lives. SoulseekQt has no readable config
+    /// on disk; the user must export one.
+    func defaultConfigURL() -> URL? {
+        switch self {
+        case .nicotine: NicotineConfigImporter.defaultConfigURL()
+        case .soulseekQt: nil
+        }
+    }
+
+    var missingConfigText: String {
+        switch self {
+        case .nicotine:
+            "No Nicotine+ config found at ~/.config/nicotine/config"
+        case .soulseekQt:
+            "In SoulseekQt open Options › Extras › Export Client Configuration Data, then choose the .scd1 file."
+        }
+    }
+
+    var panelDirectory: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        switch self {
+        case .nicotine: return home.appendingPathComponent(".config/nicotine")
+        case .soulseekQt: return home
+        }
+    }
+
+    func load(_ url: URL) throws -> ImportedClientConfig {
+        switch self {
+        case .nicotine: try NicotineConfigImporter.load(from: url)
+        case .soulseekQt: try SoulseekQtConfigImporter.load(from: url)
+        }
+    }
+}
+
+/// One-shot migration of settings from another client. Finds or asks for
+/// the config, shows the found values with checkboxes, and applies only
+/// the selected groups.
+struct ClientImportSheet: View {
     @Environment(\.appState) private var appState
-    @Binding var isPresented: Bool
+    @Environment(\.dismiss) private var dismiss
+    let source: ClientImportSource
 
     @State private var configURL: URL?
-    @State private var config: NicotineConfig?
+    @State private var config: ImportedClientConfig?
     @State private var loadError: String?
 
     @State private var importCredentials = true
@@ -19,7 +68,7 @@ struct NicotineImportSheet: View {
     @State private var importTransferLimits = true
     @State private var importShares = true
     @State private var importIgnored = true
-    @State private var joinRoomsNow = false
+    @State private var importAutoJoinRooms = true
 
     private var isConnected: Bool {
         appState.connection.connectionStatus == .connected
@@ -27,7 +76,7 @@ struct NicotineImportSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: SeeleSpacing.md) {
-            Text("Import from Nicotine+")
+            Text("Import from \(source.name)")
                 .font(SeeleTypography.title)
                 .foregroundStyle(SeeleColors.textPrimary)
 
@@ -57,13 +106,13 @@ struct NicotineImportSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel") {
-                    isPresented = false
+                    dismiss()
                 }
                 .buttonStyle(.seeleSecondary)
                 .keyboardShortcut(.cancelAction)
                 Button("Import") {
                     applyImport()
-                    isPresented = false
+                    dismiss()
                 }
                 .buttonStyle(.seelePrimary)
                 .keyboardShortcut(.defaultAction)
@@ -78,7 +127,7 @@ struct NicotineImportSheet: View {
 
     private var nothingSelected: Bool {
         !(importCredentials || importListenPort || importDownloadDirs
-            || importTransferLimits || importShares || importIgnored || joinRoomsNow)
+            || importTransferLimits || importShares || importIgnored || importAutoJoinRooms)
     }
 
     // MARK: - Rows
@@ -87,10 +136,10 @@ struct NicotineImportSheet: View {
         HStack(spacing: SeeleSpacing.sm) {
             Image(systemName: configURL == nil ? "questionmark.folder" : "doc.text")
                 .foregroundStyle(SeeleColors.textSecondary)
-            Text(configURL?.path ?? "No Nicotine+ config found at ~/.config/nicotine/config")
+            Text(configURL?.path ?? source.missingConfigText)
                 .font(SeeleTypography.caption)
                 .foregroundStyle(SeeleColors.textSecondary)
-                .lineLimit(1)
+                .lineLimit(configURL == nil ? 3 : 1)
                 .truncationMode(.middle)
 
             Spacer()
@@ -103,7 +152,7 @@ struct NicotineImportSheet: View {
     }
 
     @ViewBuilder
-    private func optionRows(_ config: NicotineConfig) -> some View {
+    private func optionRows(_ config: ImportedClientConfig) -> some View {
         if let username = config.username {
             optionRow(
                 isOn: $importCredentials,
@@ -148,11 +197,9 @@ struct NicotineImportSheet: View {
         }
         if !config.autojoinRooms.isEmpty {
             optionRow(
-                isOn: $joinRoomsNow,
-                title: "Join rooms now (\(config.autojoinRooms.count))",
+                isOn: $importAutoJoinRooms,
+                title: "Auto-join rooms (\(config.autojoinRooms.count))",
                 detail: config.autojoinRooms.joined(separator: ", ")
-                    + (isConnected ? "" : " — connect first"),
-                disabled: !isConnected
             )
         }
     }
@@ -180,7 +227,7 @@ struct NicotineImportSheet: View {
         .opacity(disabled ? 0.5 : 1)
     }
 
-    private func transferLimitsDetail(_ config: NicotineConfig) -> String {
+    private func transferLimitsDetail(_ config: ImportedClientConfig) -> String {
         var parts: [String] = []
         if let slots = config.uploadSlots { parts.append("\(slots) upload slots") }
         if let up = config.uploadSpeedLimit { parts.append("up \(up == 0 ? "unlimited" : "\(up) KB/s")") }
@@ -192,7 +239,7 @@ struct NicotineImportSheet: View {
 
     private func loadDefaultConfig() {
         guard config == nil else { return }
-        if let url = NicotineConfigImporter.defaultConfigURL() {
+        if let url = source.defaultConfigURL() {
             load(url)
         }
     }
@@ -203,8 +250,7 @@ struct NicotineImportSheet: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.showsHiddenFiles = true
-        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/nicotine")
+        panel.directoryURL = source.panelDirectory
         if panel.runModal() == .OK, let url = panel.url {
             load(url)
         }
@@ -212,10 +258,9 @@ struct NicotineImportSheet: View {
 
     private func load(_ url: URL) {
         do {
-            config = try NicotineConfigImporter.load(from: url)
+            config = try source.load(url)
             configURL = url
             loadError = nil
-            joinRoomsNow = false
         } catch {
             loadError = "Couldn't read config: \(error.localizedDescription)"
         }
@@ -254,25 +299,30 @@ struct NicotineImportSheet: View {
         }
         if importShares {
             let shareManager = appState.networkClient.shareManager
-            for path in config.sharedFolders where isDirectory(path) {
-                shareManager.addFolder(URL(fileURLWithPath: path))
+            let folderPaths = config.sharedFolders.filter { isDirectory($0) }
+            Task {
+                for path in folderPaths {
+                    await shareManager.addFolder(URL(fileURLWithPath: path))
+                }
             }
         }
         if importIgnored {
             let users = config.ignoredUsers
+            let reason = "Imported from \(source.name)"
             let socialState = appState.socialState
             Task {
                 for user in users {
-                    await socialState.ignoreUser(user, reason: "Imported from Nicotine+")
+                    await socialState.ignoreUser(user, reason: reason)
                 }
             }
         }
-        if joinRoomsNow, isConnected {
-            for room in config.autojoinRooms {
-                appState.chatState.joinRoom(room)
+        if importAutoJoinRooms {
+            let new = config.autojoinRooms.filter { !settings.autoJoinRooms.contains($0) }
+            settings.autoJoinRooms += new
+            if isConnected {
+                for room in new { appState.chatState.joinRoom(room, select: false) }
             }
         }
-        settings.save()
     }
 
     private func isDirectory(_ path: String) -> Bool {

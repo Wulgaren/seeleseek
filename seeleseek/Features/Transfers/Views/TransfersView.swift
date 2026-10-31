@@ -3,25 +3,12 @@ import SeeleseekCore
 
 struct TransfersView: View {
     @Environment(\.appState) private var appState
-    @State private var selectedTab: TransferTab = .downloads
     @State private var isDashboardPresented = false
     @State private var isClearHistoryConfirmationPresented = false
+    @State private var isCancelAllConfirmationPresented = false
+    @State private var isCancelAllUploadsConfirmationPresented = false
 
     private var transferState: TransferState { appState.transferState }
-
-    enum TransferTab: String, CaseIterable {
-        case downloads = "Downloads"
-        case uploads = "Uploads"
-        case history = "History"
-
-        var icon: String {
-            switch self {
-            case .downloads: "arrow.down.circle"
-            case .uploads: "arrow.up.circle"
-            case .history: "clock.arrow.circlepath"
-            }
-        }
-    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,7 +16,7 @@ struct TransfersView: View {
 
             Divider().background(SeeleColors.surfaceSecondary)
 
-            switch selectedTab {
+            switch appState.navigation.transfersTab {
             case .downloads:
                 downloadsView
             case .uploads:
@@ -39,7 +26,7 @@ struct TransfersView: View {
             }
         }
         .background(SeeleColors.background)
-        .focusedSceneValue(\.tabCommands, .cycling($selectedTab))
+        .focusedSceneValue(\.tabCommands, .cycling(Bindable(appState.navigation).transfersTab))
         .sheet(isPresented: Bindable(appState.metadataState).isEditorPresented) {
             MetadataEditorSheet(state: appState.metadataState)
         }
@@ -58,11 +45,35 @@ struct TransfersView: View {
         } message: {
             Text("This permanently deletes all completed-transfer records and totals. This cannot be undone.")
         }
+        .confirmationDialog(
+            "Cancel all downloads?",
+            isPresented: $isCancelAllConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Cancel Downloads", role: .destructive) {
+                transferState.cancelAllDownloads()
+            }
+            Button("Keep Downloading", role: .cancel) {}
+        } message: {
+            Text("Stops every queued and in-progress download. Cancelled files stay listed and can be retried.")
+        }
+        .confirmationDialog(
+            "Cancel all uploads?",
+            isPresented: $isCancelAllUploadsConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("Cancel Uploads", role: .destructive) {
+                transferState.cancelAllUploads()
+            }
+            Button("Keep Uploading", role: .cancel) {}
+        } message: {
+            Text("Stops every queued and in-progress upload. Peers are told the transfer was cancelled.")
+        }
     }
 
     private var tabBar: some View {
         StandardTabBar(
-            selection: $selectedTab,
+            selection: Bindable(appState.navigation).transfersTab,
             icon: { $0.icon },
             badge: { tab in
                 switch tab {
@@ -83,11 +94,17 @@ struct TransfersView: View {
     }
 
     private var hasClearableTransfers: Bool {
-        !transferState.completedDownloads.isEmpty || !transferState.failedDownloads.isEmpty
+        (transferState.downloads + transferState.uploads).contains {
+            $0.status == .completed || $0.status == .failed || $0.status == .cancelled
+        }
+    }
+
+    private var hasCancellableTransfers: Bool {
+        transferState.hasCancellableDownloads || transferState.hasCancellableUploads
     }
 
     /// Always present so the trailing cluster never reflows; disabled
-    /// (not hidden) when there is nothing to clear.
+    /// (not hidden) when there is nothing to clear or cancel.
     private var clearMenu: some View {
         Menu {
             Button("Clear Completed") {
@@ -96,15 +113,24 @@ struct TransfersView: View {
             Button("Clear Failed") {
                 transferState.clearFailed()
             }
+            Divider()
+            Button("Cancel All Downloads", role: .destructive) {
+                isCancelAllConfirmationPresented = true
+            }
+            .disabled(!transferState.hasCancellableDownloads)
+            Button("Cancel All Uploads", role: .destructive) {
+                isCancelAllUploadsConfirmationPresented = true
+            }
+            .disabled(!transferState.hasCancellableUploads)
         } label: {
             Image(systemName: "trash")
         }
         .buttonStyle(.seeleIcon)
         .menuIndicator(.hidden)
         .fixedSize()
-        .disabled(!hasClearableTransfers)
-        .help("Clear finished transfers")
-        .accessibilityLabel("Clear finished transfers")
+        .disabled(!hasClearableTransfers && !hasCancellableTransfers)
+        .help("Clear or cancel transfers")
+        .accessibilityLabel("Clear or cancel transfers")
     }
 
     @ViewBuilder
@@ -119,7 +145,8 @@ struct TransfersView: View {
             transferList(
                 transfers: transferState.downloads,
                 onMoveToTop: { transferState.moveDownloadToTop(id: $0) },
-                onMoveToBottom: { transferState.moveDownloadToBottom(id: $0) }
+                onMoveToBottom: { transferState.moveDownloadToBottom(id: $0) },
+                onCancelFolder: { transferState.cancelFolder(of: $0) }
             )
         }
     }
@@ -209,7 +236,8 @@ struct TransfersView: View {
     private func transferList(
         transfers: [Transfer],
         onMoveToTop: ((UUID) -> Void)? = nil,
-        onMoveToBottom: ((UUID) -> Void)? = nil
+        onMoveToBottom: ((UUID) -> Void)? = nil,
+        onCancelFolder: ((Transfer) -> Void)? = nil
     ) -> some View {
         ScrollView {
             LazyVStack(spacing: SeeleSpacing.dividerSpacing) {
@@ -220,14 +248,15 @@ struct TransfersView: View {
                         onRetry: {
                             transferState.retryTransfer(id: transfer.id)
                             if transfer.direction == .download {
-                                appState.downloadManager.retryFailedDownload(transferId: transfer.id)
+                                Task { await appState.downloadManager.retryFailedDownload(transferId: transfer.id) }
                             } else {
-                                appState.uploadManager.retryFailedUpload(transferId: transfer.id)
+                                Task { await appState.uploadManager.retryFailedUpload(transferId: transfer.id) }
                             }
                         },
                         onRemove: { transferState.removeTransfer(id: transfer.id) },
                         onMoveToTop: onMoveToTop.map { cb in { cb(transfer.id) } },
-                        onMoveToBottom: onMoveToBottom.map { cb in { cb(transfer.id) } }
+                        onMoveToBottom: onMoveToBottom.map { cb in { cb(transfer.id) } },
+                        onCancelFolder: onCancelFolder.map { cb in { cb(transfer) } }
                     )
                 }
             }
@@ -235,8 +264,10 @@ struct TransfersView: View {
     }
 }
 
+#if DEBUG
 #Preview {
     TransfersView()
         .environment(\.appState, AppState())
         .frame(width: 800, height: 600)
 }
+#endif

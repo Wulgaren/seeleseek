@@ -13,41 +13,51 @@ struct DiagnosticsSection: View {
     @State private var browseTestResult: String = ""
     @State private var isTestingBrowse: Bool = false
 
+    /// Computed from the mirrors so this view never observes the live
+    /// network coordinator.
+    private var reachability: NetworkClient.Reachability {
+        NetworkClient.classifyReachability(
+            directInbound: appState.networkClient.monitor.peerInitCount,
+            indirectWanted: appState.networkClient.monitor.connectToPeerCount,
+            hasActiveMapping: !appState.networkClient.status.natMappings.isEmpty
+        )
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: SeeleSpacing.sectionSpacing) {
             settingsHeader("Diagnostics")
 
             settingsGroup("Connection Status") {
-                diagRow("Server Connected", value: appState.networkClient.isConnected ? "Yes" : "No",
-                       color: appState.networkClient.isConnected ? SeeleColors.success : SeeleColors.error)
-                diagRow("Logged In", value: appState.networkClient.loggedIn ? "Yes" : "No",
-                       color: appState.networkClient.loggedIn ? SeeleColors.success : SeeleColors.error)
-                diagRow("Username", value: appState.networkClient.username.isEmpty ? "-" : appState.networkClient.username)
+                diagRow("Server Connected", value: appState.networkClient.status.isConnected ? "Yes" : "No",
+                       color: appState.networkClient.status.isConnected ? SeeleColors.success : SeeleColors.error)
+                diagRow("Logged In", value: appState.networkClient.status.loggedIn ? "Yes" : "No",
+                       color: appState.networkClient.status.loggedIn ? SeeleColors.success : SeeleColors.error)
+                diagRow("Username", value: appState.networkClient.status.username.isEmpty ? "-" : appState.networkClient.status.username)
 
-                if let error = appState.networkClient.connectionError {
+                if let error = appState.networkClient.status.connectionError {
                     diagRow("Last Error", value: error, color: SeeleColors.error)
                 }
             }
 
             settingsGroup("Network Configuration") {
-                diagRow("Listen Port", value: appState.networkClient.listenPort > 0 ? "\(appState.networkClient.listenPort)" : "-")
-                diagRow("Obfuscated Port", value: appState.networkClient.obfuscatedPort > 0 ? "\(appState.networkClient.obfuscatedPort)" : "-")
-                diagRow("Local IP", value: appState.networkClient.localIP ?? "-")
-                diagRow("External IP", value: appState.networkClient.externalIP ?? "Unknown")
+                diagRow("Listen Port", value: appState.networkClient.status.listenPort > 0 ? "\(appState.networkClient.status.listenPort)" : "-")
+                diagRow("Obfuscated Port", value: appState.networkClient.status.obfuscatedPort > 0 ? "\(appState.networkClient.status.obfuscatedPort)" : "-")
+                diagRow("Local IP", value: appState.networkClient.status.localIP ?? "-")
+                diagRow("External IP", value: appState.networkClient.status.externalIP ?? "Unknown")
                 diagRow("Configured Port", value: "\(appState.settings.listenPort)")
                 diagRow("UPnP Enabled", value: appState.settings.enableUPnP ? "Yes" : "No")
             }
 
             settingsGroup("NAT / Reachability") {
                 diagRow("Reachability",
-                        value: appState.networkClient.reachability.label,
-                        color: reachabilityColor(appState.networkClient.reachability))
-                diagRow("Gateway", value: appState.networkClient.natGateway ?? "-")
-                diagRow("Port Mappings", value: mappingSummary(appState.networkClient.natMappings))
-                if !appState.networkClient.natMappings.isEmpty {
+                        value: reachability.label,
+                        color: reachabilityColor(reachability))
+                diagRow("Gateway", value: appState.networkClient.status.natGateway ?? "-")
+                diagRow("Port Mappings", value: mappingSummary(appState.networkClient.status.natMappings))
+                if !appState.networkClient.status.natMappings.isEmpty {
                     settingsRow {
                         VStack(alignment: .leading, spacing: SeeleSpacing.xxs) {
-                            ForEach(appState.networkClient.natMappings, id: \.internalPort) { mapping in
+                            ForEach(appState.networkClient.status.natMappings, id: \.internalPort) { mapping in
                                 Text("\(mapping.proto) \(mapping.internalPort) → \(mapping.externalPort)")
                                     .font(SeeleTypography.mono)
                                     .foregroundStyle(SeeleColors.textSecondary)
@@ -57,11 +67,11 @@ struct DiagnosticsSection: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                settingsCaption("\(reachabilityHint(appState.networkClient.reachability))")
+                settingsCaption("\(reachabilityHint(reachability))")
             }
 
             settingsGroup("Peer Connections") {
-                let pool = appState.networkClient.peerConnectionPool
+                let pool = appState.networkClient.monitor
                 diagRow("Active / Total", value: "\(pool.activeConnections) / \(pool.totalConnections)")
                 diagRow("Max Connections", value: "\(pool.maxConnections)")
 
@@ -103,119 +113,48 @@ struct DiagnosticsSection: View {
                 }
                 diagRow("Downloads", value: "\(stats.filesDownloaded)")
                 diagRow("Uploads", value: "\(stats.filesUploaded)")
-                diagRow("Searches Performed", value: "\(stats.searchesPerformed)")
                 let uniqueUsers = stats.uniqueUsersDownloadedFrom.count + stats.uniqueUsersUploadedTo.count
                 diagRow("Unique Peers (Session)", value: "\(uniqueUsers)")
             }
 
             settingsGroup("Distributed Network") {
-                diagRow("Accept Children", value: appState.networkClient.acceptDistributedChildren ? "Yes" : "No")
-                diagRow("Branch Level", value: "\(appState.networkClient.distributedBranchLevel)")
+                diagRow("Accept Children", value: appState.networkClient.status.acceptDistributedChildren ? "Yes" : "No")
+                diagRow("Branch Level", value: "\(appState.networkClient.status.distributedBranchLevel)")
                 diagRow("Branch Root",
-                       value: appState.networkClient.distributedBranchRoot.isEmpty ? "-" : appState.networkClient.distributedBranchRoot)
-                diagRow("Children", value: "\(appState.networkClient.distributedChildren.count)")
+                       value: appState.networkClient.status.distributedBranchRoot.isEmpty ? "-" : appState.networkClient.status.distributedBranchRoot)
+                diagRow("Children", value: "\(appState.networkClient.status.distributedChildrenCount)")
             }
 
             settingsGroup("Port Reachability Test") {
-                settingsRow {
-                    VStack(alignment: .leading, spacing: SeeleSpacing.sm) {
-                        Text("Tests if your listen port is reachable from the internet.")
-                            .font(SeeleTypography.caption)
-                            .foregroundStyle(SeeleColors.textTertiary)
-
-                        if isTestingPort {
-                            HStack(spacing: SeeleSpacing.sm) {
-                                ProgressView().scaleEffect(0.7)
-                                    .accessibilityLabel("Testing")
-                                Text("Testing port reachability...")
-                                    .font(SeeleTypography.body)
-                                    .foregroundStyle(SeeleColors.textSecondary)
-                            }
-                        } else {
-                            Button("Test Port Reachability") {
-                                testPortReachability()
-                            }
-                            .font(SeeleTypography.body)
-                            .buttonStyle(.plain)
-                            .foregroundStyle(SeeleColors.accent)
-                        }
-
-                        if !portTestResult.isEmpty {
-                            Text(portTestResult)
-                                .font(SeeleTypography.mono)
-                                .foregroundStyle(SeeleColors.textSecondary)
-                                .textSelection(.enabled)
-                        }
+                testPanel(caption: "Tests if your listen port is reachable from the internet.", result: portTestResult) {
+                    testButton("Test Port Reachability", isRunning: isTestingPort, runningText: "Testing port reachability...") {
+                        testPortReachability()
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
 
             settingsGroup("Browse Test") {
-                settingsRow {
-                    VStack(alignment: .leading, spacing: SeeleSpacing.sm) {
-                        Text("Test browsing a specific user to diagnose connection issues.")
-                            .font(SeeleTypography.caption)
-                            .foregroundStyle(SeeleColors.textTertiary)
+                testPanel(caption: "Test browsing a specific user to diagnose connection issues.", result: browseTestResult) {
+                    HStack(spacing: SeeleSpacing.sm) {
+                        TextField("Username", text: $browseTestUsername)
+                            .textFieldStyle(SeeleTextFieldStyle())
+                            .accessibilityLabel("Username to browse")
 
-                        HStack(spacing: SeeleSpacing.sm) {
-                            TextField("Username", text: $browseTestUsername)
-                                .textFieldStyle(SeeleTextFieldStyle())
-                                .accessibilityLabel("Username to browse")
-
-                            if isTestingBrowse {
-                                ProgressView().scaleEffect(0.7)
-                                    .accessibilityLabel("Testing")
-                            } else {
-                                Button("Test Browse") {
-                                    testBrowse()
-                                }
-                                .font(SeeleTypography.body)
-                                .buttonStyle(.plain)
-                                .foregroundStyle(SeeleColors.accent)
+                        if isTestingBrowse {
+                            testSpinner
+                        } else {
+                            testButton("Test Browse") { testBrowse() }
                                 .disabled(browseTestUsername.isEmpty)
-                            }
-                        }
-
-                        if !browseTestResult.isEmpty {
-                            Text(browseTestResult)
-                                .font(SeeleTypography.mono)
-                                .foregroundStyle(SeeleColors.textSecondary)
-                                .textSelection(.enabled)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
 
             settingsGroup("Server Connection Test") {
-                settingsRow {
-                    VStack(alignment: .leading, spacing: SeeleSpacing.sm) {
-                        if isTesting {
-                            HStack(spacing: SeeleSpacing.sm) {
-                                ProgressView().scaleEffect(0.7)
-                                    .accessibilityLabel("Testing")
-                                Text("Testing...")
-                                    .font(SeeleTypography.body)
-                                    .foregroundStyle(SeeleColors.textSecondary)
-                            }
-                        } else {
-                            Button("Test Server Connection") {
-                                testConnection()
-                            }
-                            .font(SeeleTypography.body)
-                            .buttonStyle(.plain)
-                            .foregroundStyle(SeeleColors.accent)
-                        }
-
-                        if !testResult.isEmpty {
-                            Text(testResult)
-                                .font(SeeleTypography.mono)
-                                .foregroundStyle(SeeleColors.textSecondary)
-                                .textSelection(.enabled)
-                        }
+                testPanel(result: testResult) {
+                    testButton("Test Server Connection", isRunning: isTesting, runningText: "Testing...") {
+                        testConnection()
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
 
@@ -230,6 +169,52 @@ struct DiagnosticsSection: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+        }
+    }
+
+    private var testSpinner: some View {
+        ProgressView().scaleEffect(0.7)
+            .accessibilityLabel("Testing")
+    }
+
+    private func testButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .font(SeeleTypography.body)
+            .buttonStyle(.plain)
+            .foregroundStyle(SeeleColors.accent)
+    }
+
+    @ViewBuilder
+    private func testButton(_ title: String, isRunning: Bool, runningText: String, action: @escaping () -> Void) -> some View {
+        if isRunning {
+            HStack(spacing: SeeleSpacing.sm) {
+                testSpinner
+                Text(runningText)
+                    .font(SeeleTypography.body)
+                    .foregroundStyle(SeeleColors.textSecondary)
+            }
+        } else {
+            testButton(title, action: action)
+        }
+    }
+
+    private func testPanel<Control: View>(caption: String? = nil, result: String, @ViewBuilder control: () -> Control) -> some View {
+        settingsRow {
+            VStack(alignment: .leading, spacing: SeeleSpacing.sm) {
+                if let caption {
+                    Text(caption)
+                        .font(SeeleTypography.caption)
+                        .foregroundStyle(SeeleColors.textTertiary)
+                }
+                control()
+                if !result.isEmpty {
+                    Text(result)
+                        .font(SeeleTypography.mono)
+                        .foregroundStyle(SeeleColors.textSecondary)
+                        .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -307,8 +292,8 @@ struct DiagnosticsSection: View {
 
         Task {
             var results: [String] = []
-            let port = appState.networkClient.listenPort
-            let externalIP = appState.networkClient.externalIP ?? "unknown"
+            let port = appState.networkClient.status.listenPort
+            let externalIP = appState.networkClient.status.externalIP ?? "unknown"
 
             results.append("Testing port \(port) reachability...")
             results.append("External IP: \(externalIP)")
@@ -317,7 +302,7 @@ struct DiagnosticsSection: View {
                 results.append("Check manually at: portchecker.co")
             }
 
-            let ctpCount = appState.networkClient.peerConnectionPool.connectToPeerCount
+            let ctpCount = appState.networkClient.monitor.connectToPeerCount
             if ctpCount > 0 {
                 results.append("✓ Receiving ConnectToPeer requests (\(ctpCount))")
                 results.append("  Server knows our port, but peers may not be able to reach us")
@@ -326,7 +311,7 @@ struct DiagnosticsSection: View {
                 results.append("  Try searching first to trigger peer connections")
             }
 
-            let activeCount = appState.networkClient.peerConnectionPool.activeConnections
+            let activeCount = appState.networkClient.monitor.activeConnections
             results.append("Active peer connections: \(activeCount)")
 
             if activeCount == 0 && ctpCount > 10 {
@@ -520,6 +505,7 @@ struct DiagnosticsSection: View {
     }
 }
 
+#if DEBUG
 #Preview {
     ScrollView {
         DiagnosticsSection()
@@ -529,3 +515,4 @@ struct DiagnosticsSection: View {
     .frame(width: 500, height: 600)
     .background(SeeleColors.background)
 }
+#endif

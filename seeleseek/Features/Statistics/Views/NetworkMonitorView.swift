@@ -2,27 +2,13 @@ import SwiftUI
 import SeeleseekCore
 
 struct NetworkMonitorView: View {
-    @State private var selectedTab: MonitorTab = .overview
-
-    enum MonitorTab: String, CaseIterable {
-        case overview = "Overview"
-        case peers = "Peers"
-        case search = "Search"
-        case history = "History"
-
-        var icon: String {
-            switch self {
-            case .overview: "waveform.path.ecg"
-            case .peers: "person.line.dotted.person"
-            case .search: "magnifyingglass"
-            case .history: "clock.arrow.trianglehead.counterclockwise.rotate.90"
-            }
-        }
-    }
+    @Environment(\.appState) private var appState
 
     var body: some View {
+        @Bindable var navigation = appState.navigation
+
         VStack(spacing: 0) {
-            StandardTabBar(selection: $selectedTab, icon: { $0.icon }) {
+            StandardTabBar(selection: $navigation.monitorTab, icon: { $0.icon }) {
                 MonitorLiveStatsBadge()
             }
 
@@ -30,7 +16,7 @@ struct NetworkMonitorView: View {
                 .background(SeeleColors.surfaceSecondary)
 
             ScrollView {
-                switch selectedTab {
+                switch navigation.monitorTab {
                 case .overview:
                     NetworkOverviewTab()
                 case .peers:
@@ -43,7 +29,7 @@ struct NetworkMonitorView: View {
             }
         }
         .background(SeeleColors.background)
-        .focusedSceneValue(\.tabCommands, .cycling($selectedTab))
+        .focusedSceneValue(\.tabCommands, .cycling($navigation.monitorTab))
     }
 }
 
@@ -52,33 +38,43 @@ struct NetworkMonitorView: View {
 struct MonitorLiveStatsBadge: View {
     @Environment(\.appState) private var appState
 
-    private var peerPool: PeerConnectionPool {
-        appState.networkClient.peerConnectionPool
+    private var monitor: NetworkMonitorState {
+        appState.networkClient.monitor
     }
 
     var body: some View {
-        StandardStatCluster {
-            StandardLiveStat(
-                icon: "arrow.down",
-                value: Int64(peerPool.currentDownloadSpeed).formattedSpeed,
-                iconColor: SeeleColors.info,
-                accessibilityLabel: "Download speed \(peerPool.currentDownloadSpeed.formattedSpeed)"
-            )
-            StandardLiveStat(
-                icon: "arrow.up",
-                value: Int64(peerPool.currentUploadSpeed).formattedSpeed,
-                iconColor: SeeleColors.success,
-                accessibilityLabel: "Upload speed \(peerPool.currentUploadSpeed.formattedSpeed)"
-            )
-            StandardLiveStat(
-                icon: "person.2.fill",
-                value: "\(peerPool.activeConnections)",
-                accessibilityLabel: "\(peerPool.activeConnections) active peers"
-            )
+        ViewThatFits(in: .horizontal) {
+            cluster(withPeers: true)
+            cluster(withPeers: false)
+            Color.clear.frame(width: 0, height: 0)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Live network stats")
-        .accessibilityValue("Download \(peerPool.currentDownloadSpeed.formattedSpeed), upload \(peerPool.currentUploadSpeed.formattedSpeed), \(peerPool.activeConnections) active peers")
+        .accessibilityValue("Download \(monitor.currentDownloadSpeed.formattedSpeed), upload \(monitor.currentUploadSpeed.formattedSpeed), \(monitor.activeConnections) active peers")
+    }
+
+    private func cluster(withPeers: Bool) -> some View {
+        StandardStatCluster {
+            StandardLiveStat(
+                icon: "arrow.down",
+                value: Int64(monitor.currentDownloadSpeed).formattedSpeed,
+                iconColor: SeeleColors.info,
+                accessibilityLabel: "Download speed \(monitor.currentDownloadSpeed.formattedSpeed)"
+            )
+            StandardLiveStat(
+                icon: "arrow.up",
+                value: Int64(monitor.currentUploadSpeed).formattedSpeed,
+                iconColor: SeeleColors.success,
+                accessibilityLabel: "Upload speed \(monitor.currentUploadSpeed.formattedSpeed)"
+            )
+            if withPeers {
+                StandardLiveStat(
+                    icon: "person.2.fill",
+                    value: "\(monitor.activeConnections)",
+                    accessibilityLabel: "\(monitor.activeConnections) active peers"
+                )
+            }
+        }
     }
 }
 
@@ -97,8 +93,8 @@ struct MonitorPeersTab: View {
 private struct MonitorTopologyCard: View {
     @Environment(\.appState) private var appState
 
-    private var peerPool: PeerConnectionPool {
-        appState.networkClient.peerConnectionPool
+    private var monitor: NetworkMonitorState {
+        appState.networkClient.monitor
     }
 
     var body: some View {
@@ -110,14 +106,14 @@ private struct MonitorTopologyCard: View {
                         .foregroundStyle(SeeleColors.textPrimary)
                         .accessibilityAddTraits(.isHeader)
                     Spacer()
-                    Text("\(peerPool.activeConnections) active")
+                    Text("\(monitor.activeConnections) active")
                         .font(SeeleTypography.caption)
                         .foregroundStyle(SeeleColors.textTertiary)
                         .contentTransition(.numericText())
                 }
 
                 NetworkTopologyView(
-                    connections: Array(peerPool.connections.values),
+                    connections: Array(monitor.connections.values),
                     centerUsername: appState.connection.username ?? "You"
                 )
                 .frame(height: 320)
@@ -137,8 +133,10 @@ struct MonitorSearchTab: View {
     }
 }
 
+#if DEBUG
 #Preview {
     NetworkMonitorView()
         .environment(\.appState, AppState())
         .frame(width: 900, height: 700)
 }
+#endif

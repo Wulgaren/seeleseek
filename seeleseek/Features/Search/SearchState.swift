@@ -77,7 +77,12 @@ final class SearchState {
 
     // MARK: - Settings Reference
     weak var settings: SettingsState? {
-        didSet { isGrouped = settings?.groupSearchResults ?? false }
+        didSet { syncPersistedSettings() }
+    }
+
+    private func syncPersistedSettings() {
+        isGrouped = settings?.groupSearchResults ?? false
+        applyPersistedFilters(settings?.searchFilters ?? .empty)
     }
 
     // MARK: - Shared Activity Tracker
@@ -89,22 +94,10 @@ final class SearchState {
     private let logger = Logger(subsystem: "com.seeleseek", category: "SearchState")
 
     // MARK: - Setup
-    func setupCallbacks(client: NetworkClient) {
+    // Results are not subscribed here: `AppState.wireNetworkClient` routes
+    // wishlist tokens away and calls `addResults` for the rest.
+    func wireNetworkEvents(client: NetworkClient) {
         self.networkClient = client
-
-        logger.info("Setting up callbacks with NetworkClient...")
-
-        client.onSearchResults = { [weak self] token, results in
-            self?.logger.info("Received \(results.count) results for token \(token)")
-            if let self = self {
-                self.addResults(results, forToken: token)
-                self.logger.info("Results added to search")
-            } else {
-                self?.logger.warning("self is nil in callback!")
-            }
-        }
-
-        logger.info("Callbacks configured with NetworkClient")
 
         // Load search history
         Task {
@@ -136,24 +129,6 @@ final class SearchState {
         }
     }
 
-    /// Check for cached search results
-    func checkCache(for query: String) async -> SearchQuery? {
-        do {
-            // Check for cached results (max 1 hour old)
-            if let (queryRecord, resultRecords) = try await SearchRepository.findCached(query: query, maxAge: 3600) {
-                let results = resultRecords.map { $0.toSearchResult() }
-                var cachedQuery = SearchQuery(query: queryRecord.query, token: UInt32(queryRecord.token))
-                cachedQuery.results = results
-                cachedQuery.isSearching = false
-                logger.info("Found cached search for '\(query)' with \(results.count) results")
-                return cachedQuery
-            }
-        } catch {
-            logger.error("Failed to check search cache: \(error.localizedDescription)")
-        }
-        return nil
-    }
-
     // MARK: - Selection Mode
     var selectedResults: Set<UUID> = []
     var isSelectionMode: Bool = false {
@@ -179,36 +154,96 @@ final class SearchState {
     }
 
     // MARK: - Filters
-    // Each filter mutator calls `recomputeFilteredResults()` via didSet so
-    // the stored `filteredResults` cache stays in sync. Without this, the
-    // computed version was re-running filter + sort on every SearchView
-    // body eval — and each streaming-result batch triggered several evals,
-    // so with 500 rows we were doing tens of thousands of ops/sec.
+    // Every filter mutator must call `recomputeFilteredResults()` via
+    // didSet: `filteredResults` is a stored cache, never computed in body.
+    // Filter values also write through to `settings.searchFilters` (see
+    // `persistFiltersIfNeeded`); sort order and `showFilters` stay session-only.
+    @ObservationIgnored private var suppressFilterPersist = false
+
     var filterMinBitrate: Int? = nil {
-        didSet { if filterMinBitrate != oldValue { recomputeFilteredResults() } }
+        didSet {
+            guard filterMinBitrate != oldValue else { return }
+            recomputeFilteredResults()
+            persistFiltersIfNeeded()
+        }
     }
     var filterMinSampleRate: Int? = nil {
-        didSet { if filterMinSampleRate != oldValue { recomputeFilteredResults() } }
+        didSet {
+            guard filterMinSampleRate != oldValue else { return }
+            recomputeFilteredResults()
+            persistFiltersIfNeeded()
+        }
     }
     var filterMinBitDepth: Int? = nil {
-        didSet { if filterMinBitDepth != oldValue { recomputeFilteredResults() } }
+        didSet {
+            guard filterMinBitDepth != oldValue else { return }
+            recomputeFilteredResults()
+            persistFiltersIfNeeded()
+        }
     }
     var filterMinSize: Int64? = nil {
-        didSet { if filterMinSize != oldValue { recomputeFilteredResults() } }
+        didSet {
+            guard filterMinSize != oldValue else { return }
+            recomputeFilteredResults()
+            persistFiltersIfNeeded()
+        }
     }
     var filterMaxSize: Int64? = nil {
-        didSet { if filterMaxSize != oldValue { recomputeFilteredResults() } }
+        didSet {
+            guard filterMaxSize != oldValue else { return }
+            recomputeFilteredResults()
+            persistFiltersIfNeeded()
+        }
     }
     var filterExtensions: Set<String> = [] {
-        didSet { if filterExtensions != oldValue { recomputeFilteredResults() } }
+        didSet {
+            guard filterExtensions != oldValue else { return }
+            recomputeFilteredResults()
+            persistFiltersIfNeeded()
+        }
     }
     var filterFreeSlotOnly: Bool = false {
-        didSet { if filterFreeSlotOnly != oldValue { recomputeFilteredResults() } }
+        didSet {
+            guard filterFreeSlotOnly != oldValue else { return }
+            recomputeFilteredResults()
+            persistFiltersIfNeeded()
+        }
     }
     var sortOrder: SortOrder = .relevance {
         didSet { if sortOrder != oldValue { recomputeFilteredResults() } }
     }
     var showFilters: Bool = false
+
+    private var currentPersistedFilters: PersistedSearchFilters {
+        PersistedSearchFilters(
+            minBitrate: filterMinBitrate,
+            minSampleRate: filterMinSampleRate,
+            minBitDepth: filterMinBitDepth,
+            minSize: filterMinSize,
+            maxSize: filterMaxSize,
+            extensions: filterExtensions,
+            freeSlotOnly: filterFreeSlotOnly
+        )
+    }
+
+    private func applyPersistedFilters(_ prefs: PersistedSearchFilters) {
+        suppressFilterPersist = true
+        defer { suppressFilterPersist = false }
+        filterMinBitrate = prefs.minBitrate
+        filterMinSampleRate = prefs.minSampleRate
+        filterMinBitDepth = prefs.minBitDepth
+        filterMinSize = prefs.minSize
+        filterMaxSize = prefs.maxSize
+        filterExtensions = prefs.extensions
+        filterFreeSlotOnly = prefs.freeSlotOnly
+    }
+
+    private func persistFiltersIfNeeded() {
+        guard !suppressFilterPersist, let settings else { return }
+        let prefs = currentPersistedFilters
+        guard settings.searchFilters != prefs else { return }
+        settings.searchFilters = prefs
+    }
 
     var hasActiveFilters: Bool {
         filterMinBitrate != nil ||
@@ -232,44 +267,11 @@ final class SearchState {
         return count
     }
 
-    enum FilterPreset {
-        case mp3_320
-        case flac
-        case lossless
-        case hiRes
-
-        var extensions: Set<String> {
-            switch self {
-            case .mp3_320: return ["mp3"]
-            case .flac: return ["flac"]
-            case .lossless: return ["flac", "wav", "aiff", "alac", "ape"]
-            case .hiRes: return ["flac", "wav", "aiff", "alac"]
-            }
-        }
-
-        var minBitrate: Int? {
-            switch self {
-            case .mp3_320: return 320
-            case .flac, .lossless, .hiRes: return nil
-            }
-        }
-
-        var minSampleRate: Int? {
-            switch self {
-            case .hiRes: return 96000
-            default: return nil
-            }
-        }
-
-        var minBitDepth: Int? {
-            switch self {
-            case .hiRes: return 24
-            default: return nil
-            }
-        }
+    var filterPresets: [SearchFilterPreset] {
+        settings?.searchFilterPresets ?? SearchFilterPreset.defaults
     }
 
-    func applyPreset(_ preset: FilterPreset) {
+    func applyPreset(_ preset: SearchFilterPreset) {
         if isPresetActive(preset) {
             // Toggle off if already active
             filterExtensions = []
@@ -284,7 +286,7 @@ final class SearchState {
         }
     }
 
-    func isPresetActive(_ preset: FilterPreset) -> Bool {
+    func isPresetActive(_ preset: SearchFilterPreset) -> Bool {
         filterExtensions == preset.extensions &&
         filterMinBitrate == preset.minBitrate &&
         filterMinSampleRate == preset.minSampleRate &&
@@ -292,10 +294,14 @@ final class SearchState {
     }
 
     func toggleExtension(_ ext: String) {
-        if filterExtensions.contains(ext) {
-            filterExtensions.remove(ext)
+        toggleExtensions([ext])
+    }
+
+    func toggleExtensions(_ exts: Set<String>) {
+        if exts.isSubset(of: filterExtensions) {
+            filterExtensions.subtract(exts)
         } else {
-            filterExtensions.insert(ext)
+            filterExtensions.formUnion(exts)
         }
     }
 
@@ -334,8 +340,9 @@ final class SearchState {
 
     private(set) var resultGroups: [SearchResultGroup] = []
 
-    /// The flattened list the view renders. Derived from `resultGroups` plus
-    /// `expandedGroups`; see `SearchListItem` for why the view must not do
+    /// The flattened list the view renders: every filtered result as
+    /// `.loose` when ungrouped, otherwise derived from `resultGroups` plus
+    /// `expandedGroups`. See `SearchListItem` for why the view must not do
     /// this flattening itself.
     private(set) var displayItems: [SearchListItem] = []
 
@@ -464,7 +471,7 @@ final class SearchState {
             rebuildDisplayItems()
         } else {
             resultGroups = []
-            displayItems = []
+            displayItems = results.map(SearchListItem.loose)
         }
     }
 
@@ -534,23 +541,6 @@ final class SearchState {
         logger.info("Started search '\(self.searchQuery)' with token \(token), tab \(newIndex)")
     }
 
-    /// Start a search from cached results
-    func startSearchFromCache(_ cachedQuery: SearchQuery) {
-        searches.append(cachedQuery)
-        let newIndex = searches.count - 1
-        tokenToSearchIndex[cachedQuery.token] = newIndex
-        selectedSearchIndex = newIndex
-        // `selectedSearchIndex.didSet` would normally handle the
-        // recompute, but when the first tab is loaded from cache both
-        // sides of the assignment are 0 and the guard short-circuits —
-        // leaving `filteredResults` empty while `currentSearch.results`
-        // is populated. Recompute explicitly so this entry point is
-        // safe regardless of caller state.
-        recomputeFilteredResults()
-
-        logger.info("Loaded cached search '\(cachedQuery.query)' with \(cachedQuery.results.count) results")
-    }
-
     /// Add results to a specific search by token
     func addResults(_ results: [SearchResult], forToken token: UInt32) {
         guard let index = tokenToSearchIndex[token], index < searches.count else {
@@ -559,7 +549,7 @@ final class SearchState {
         }
 
         let maxResults = settings?.maxSearchResults ?? 500
-        let currentCount = searches[index].results.count
+        let currentCount = searches[index].results.count + (pendingResults[token]?.count ?? 0)
 
         // Check if we've already reached the limit
         if maxResults > 0 && currentCount >= maxResults {
@@ -588,28 +578,115 @@ final class SearchState {
             }
         }
 
-        searches[index].results.append(contentsOf: resultsToAdd)
-        if index == selectedSearchIndex {
-            recomputeFilteredResults()
-        }
-        logger.info("Added \(resultsToAdd.count) results to '\(self.searches[index].query)' (total: \(self.searches[index].results.count))")
+        if oldestPendingArrival == nil { oldestPendingArrival = .now }
+        pendingResults[token, default: []].append(contentsOf: resultsToAdd)
+        scheduleFlush()
+        logger.info("Staged \(resultsToAdd.count) results for '\(self.searches[index].query)' (total: \(currentCount + resultsToAdd.count))")
 
         // Record results count in activity tracker
         SearchState.activityTracker.recordSearchResults(query: searches[index].query, count: resultsToAdd.count)
 
         // Check if we've now reached the limit
-        if maxResults > 0 && searches[index].results.count >= maxResults {
+        if maxResults > 0 && currentCount + resultsToAdd.count >= maxResults {
             logger.info("Search '\(self.searches[index].query)' reached limit of \(maxResults) results, stopping")
+            flushPendingResults(force: true)
             searches[index].isSearching = false
             cancelInactivityTimer(token: token)
             announceSearchComplete(searches[index])
         }
     }
 
+    // Every peer reply is its own `addResults` call; appending straight to
+    // `searches[i].results` invalidated `SearchView` and every live row per
+    // reply (~11k row bodies for one 500-result search). Replies stage here
+    // and land once per window.
+    @ObservationIgnored private var pendingResults: [UInt32: [SearchResult]] = [:]
+    @ObservationIgnored private var flushTask: Task<Void, Never>?
+    private static let flushInterval: Duration = .milliseconds(250)
+
+    /// Landing a batch mid-scroll drops frames (the only drops seen in the
+    /// auto-scroll harness coincided with flushes), so a flush that finds
+    /// the list moved within `scrollQuietWindow` re-arms instead, up to
+    /// `maxFlushDeferral`.
+    @ObservationIgnored private var lastScrollActivity: ContinuousClock.Instant?
+    @ObservationIgnored private var oldestPendingArrival: ContinuousClock.Instant?
+    private static let scrollQuietWindow: Duration = .milliseconds(200)
+    /// 4s, not 2s: on a real search a 2s ceiling force-landed a list
+    /// restructure mid-scroll every 2s (33–69 ticks >33ms per 5s); 4s gives
+    /// 0–5, indistinguishable from 8s.
+    private static let maxFlushDeferral: Duration = .seconds(4)
+
+    /// True while the results list is in motion; false ~150ms after it
+    /// settles. Fed into `\.rowHoverSuppressed`, which nested hosting
+    /// views inherit: rows sliding under a parked cursor otherwise fire
+    /// hover enter/exit per row, each re-rendering that cell. Measured
+    /// under trackpad-style flicks at 120Hz: ~9 drops per 5s with this,
+    /// ~80 without. Flips are edge-triggered and deferred one turn so the
+    /// per-frame scroll callback never writes observable state.
+    private(set) var isListScrolling = false
+    @ObservationIgnored private var scrollSettleTask: Task<Void, Never>?
+    private static let hoverResumeQuiet: Duration = .milliseconds(150)
+
+    func noteResultsScrollActivity() {
+        lastScrollActivity = .now
+        guard scrollSettleTask == nil else { return }
+        scrollSettleTask = Task { [weak self] in
+            guard let self else { return }
+            self.isListScrolling = true
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(120))
+                if let last = self.lastScrollActivity,
+                   ContinuousClock.now - last > Self.hoverResumeQuiet {
+                    break
+                }
+            }
+            self.isListScrolling = false
+            self.scrollSettleTask = nil
+        }
+    }
+
+    private func scheduleFlush() {
+        guard flushTask == nil else { return }
+        flushTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.flushInterval)
+            guard !Task.isCancelled, let self else { return }
+            self.flushPendingResults()
+        }
+    }
+
+    /// `force` skips the mid-scroll deferral; completion and tab-close paths
+    /// must land immediately.
+    private func flushPendingResults(force: Bool = false) {
+        flushTask?.cancel()
+        flushTask = nil
+        guard !pendingResults.isEmpty else { return }
+
+        if !force,
+           let lastScroll = lastScrollActivity,
+           ContinuousClock.now - lastScroll < Self.scrollQuietWindow,
+           let oldest = oldestPendingArrival,
+           ContinuousClock.now - oldest < Self.maxFlushDeferral {
+            scheduleFlush()
+            return
+        }
+        oldestPendingArrival = nil
+
+        var touchedSelected = false
+        for (token, results) in pendingResults {
+            guard let index = tokenToSearchIndex[token], index < searches.count else { continue }
+            searches[index].results.append(contentsOf: results)
+            if index == selectedSearchIndex { touchedSelected = true }
+        }
+        pendingResults.removeAll(keepingCapacity: true)
+        if touchedSelected { recomputeFilteredResults() }
+    }
+
     /// Mark a search as complete (no longer receiving results)
     func markSearchComplete(token: UInt32) {
         cancelInactivityTimer(token: token)
         guard let index = tokenToSearchIndex[token], index < searches.count else { return }
+
+        flushPendingResults(force: true)
 
         let wasSearching = searches[index].isSearching
         searches[index].isSearching = false
@@ -664,6 +741,8 @@ final class SearchState {
     func closeSearch(at index: Int) {
         guard index >= 0, index < searches.count else { return }
 
+        // Before indices shift below, or a later flush lands in the wrong tab.
+        flushPendingResults(force: true)
         let search = searches[index]
 
         // Persist search results before closing if it has results
@@ -708,17 +787,5 @@ final class SearchState {
         filterExtensions = []
         filterFreeSlotOnly = false
         sortOrder = .relevance
-    }
-
-    /// Clean up expired search cache
-    func cleanupExpiredCache() {
-        Task {
-            do {
-                try await SearchRepository.deleteExpired(olderThan: 3600) // 1 hour
-                logger.debug("Cleaned up expired search cache")
-            } catch {
-                logger.error("Failed to cleanup search cache: \(error.localizedDescription)")
-            }
-        }
     }
 }

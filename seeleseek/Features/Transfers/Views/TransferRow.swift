@@ -109,6 +109,7 @@ struct TransferRow: View {
     let onRemove: () -> Void
     var onMoveToTop: (() -> Void)? = nil
     var onMoveToBottom: (() -> Void)? = nil
+    var onCancelFolder: (() -> Void)? = nil
 
     @State private var isHovered = false
 
@@ -155,7 +156,8 @@ struct TransferRow: View {
 
                     TransferInfoColumn(
                         transfer: transfer,
-                        peerStatus: peerStatus
+                        peerStatus: peerStatus,
+                        isLeecher: transfer.direction == .upload && appState.leechDetector.isLeecher(transfer.username)
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -194,7 +196,8 @@ struct TransferRow: View {
             onTogglePreview: toggleAudioPreview,
             onEditMetadata: openMetadataEditor,
             onMoveToTop: onMoveToTop,
-            onMoveToBottom: onMoveToBottom
+            onMoveToBottom: onMoveToBottom,
+            onCancelFolder: onCancelFolder
         ))
         .onAppear { refreshPeerStatus() }
         .onChange(of: transfer.username) { _, _ in refreshPeerStatus() }
@@ -228,6 +231,13 @@ struct TransferRow: View {
             }
             Button(action: onMoveToBottom) {
                 Label("Move to Bottom", systemImage: "arrow.down.to.line")
+            }
+            Divider()
+        }
+
+        if transfer.canCancel, let onCancelFolder {
+            Button(action: onCancelFolder) {
+                Label("Cancel Folder", systemImage: "xmark.circle")
             }
             Divider()
         }
@@ -320,6 +330,7 @@ private struct TransferRowAccessibilityActions: ViewModifier {
     let onEditMetadata: () -> Void
     let onMoveToTop: (() -> Void)?
     let onMoveToBottom: (() -> Void)?
+    let onCancelFolder: (() -> Void)?
 
     private var isCompletedAudio: Bool {
         transfer.status == .completed && transfer.isAudioFile && transfer.localPath != nil
@@ -338,6 +349,9 @@ private struct TransferRowAccessibilityActions: ViewModifier {
         content.accessibilityActions {
             if transfer.canCancel {
                 Button("Cancel", action: onCancel)
+                if let onCancelFolder {
+                    Button("Cancel folder", action: onCancelFolder)
+                }
             }
             if transfer.canRetry {
                 Button("Retry", action: onRetry)
@@ -380,6 +394,7 @@ private struct TransferDirectionGlyph: View {
 private struct TransferInfoColumn: View {
     let transfer: Transfer
     let peerStatus: BuddyStatus?
+    var isLeecher = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: SeeleSpacing.xxs) {
@@ -465,6 +480,14 @@ private struct TransferInfoColumn: View {
                 peerStatus: peerStatus
             )
 
+            if isLeecher {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: SeeleSpacing.iconSizeXS, weight: .bold))
+                    .foregroundStyle(SeeleColors.warning)
+                    .help("Leecher: this user shares fewer files than your minimum")
+                    .accessibilityLabel("Leecher")
+            }
+
             if transfer.retryCount > 0, transfer.error != nil {
                 Text("retry \(transfer.retryCount)")
                     .font(SeeleTypography.monoSmall)
@@ -475,33 +498,12 @@ private struct TransferInfoColumn: View {
     }
 
     private var offlineLabel: some View {
-        HStack(spacing: SeeleSpacing.xs) {
-            Image(systemName: "wifi.slash")
-                .font(.system(size: SeeleSpacing.iconSizeXS))
-                .foregroundStyle(SeeleColors.error)
-                .accessibilityHidden(true)
-
-            Text("Peer offline")
-                .font(SeeleTypography.monoSmall)
-                .foregroundStyle(SeeleColors.error)
-                .lineLimit(1)
-        }
+        RowStatusLabel(icon: "wifi.slash", text: "Peer offline", tint: SeeleColors.error)
     }
 
     private func errorLabel(_ error: String) -> some View {
-        HStack(spacing: SeeleSpacing.xs) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: SeeleSpacing.iconSizeXS))
-                .foregroundStyle(SeeleColors.error)
-                .accessibilityHidden(true)
-
-            Text(error)
-                .font(SeeleTypography.monoSmall)
-                .foregroundStyle(SeeleColors.error)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .help(error)
-        }
+        RowStatusLabel(icon: "exclamationmark.triangle.fill", text: error, tint: SeeleColors.error)
+            .help(error)
     }
 
     /// Pending-retry variant of `errorLabel`: orange clock instead of red
@@ -512,33 +514,12 @@ private struct TransferInfoColumn: View {
     private var retryWaitingLabel: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let countdown = transfer.retryCountdownString(now: context.date) ?? "soon"
-            HStack(spacing: SeeleSpacing.xs) {
-                Image(systemName: "clock")
-                    .font(.system(size: SeeleSpacing.iconSizeXS))
-                    .foregroundStyle(SeeleColors.warning)
-                    .accessibilityHidden(true)
-
-                Text("Retrying in \(countdown)")
-                    .font(SeeleTypography.monoSmall)
-                    .foregroundStyle(SeeleColors.warning)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
+            RowStatusLabel(icon: "clock", text: "Retrying in \(countdown)", tint: SeeleColors.warning)
         }
     }
 
     private var retryLabel: some View {
-        HStack(spacing: SeeleSpacing.xs) {
-            Image(systemName: "arrow.clockwise")
-                .font(.system(size: SeeleSpacing.iconSizeXS))
-                .foregroundStyle(SeeleColors.warning)
-                .accessibilityHidden(true)
-
-            Text("retry \(transfer.retryCount)")
-                .font(SeeleTypography.monoSmall)
-                .foregroundStyle(SeeleColors.warning)
-                .monospacedDigit()
-        }
+        RowStatusLabel(icon: "arrow.clockwise", text: "retry \(transfer.retryCount)", tint: SeeleColors.warning)
     }
 }
 

@@ -12,10 +12,13 @@ Searches use tokens. You supply a unique token. The token connects the results t
 ```swift
 let token = UInt32.random(in: 0...UInt32.max)
 
-client.onSearchResults = { resultToken, results in
-    if resultToken == token {
-        for result in results {
-            print("\(result.username): \(result.filename) (\(result.formattedSize))")
+let searchEvents = client.events.search.subscribe()
+Task {
+    for await event in searchEvents {
+        if case .results(let resultToken, let results) = event, resultToken == token {
+            for result in results {
+                print("\(result.username): \(result.filename) (\(result.formattedSize))")
+            }
         }
     }
 }
@@ -23,7 +26,7 @@ client.onSearchResults = { resultToken, results in
 try await client.search(query: "boards of canada", token: token)
 ```
 
-Results arrive asynchronously when peers on the network respond. The callback can fire many times for one search.
+Results arrive asynchronously when peers on the network respond. The stream can send many result batches for one search. Subscribe before you connect — the bus does not buffer events for subscribers that arrive late.
 
 ## Search Types
 
@@ -35,14 +38,6 @@ The standard search sends your query across the distributed network:
 try await client.search(query: "artist album", token: token)
 ```
 
-### Room Search
-
-Search the members of one chat room:
-
-```swift
-try await client.searchRoom("Electronic Music", query: "ambient", token: token)
-```
-
 ### User Search
 
 Search the shared files of one user:
@@ -51,16 +46,15 @@ Search the shared files of one user:
 try await client.userSearch(username: "alice", token: token, query: "flac")
 ```
 
-### Wishlist Search
+### Wishlist Interval
 
-Add a search that the server repeats at an interval:
+The server sets the wishlist interval. It arrives on the search event stream:
 
 ```swift
-try await client.addWishlistSearch(query: "rare album", token: token)
-
-// The server sets the interval
-client.onWishlistInterval = { seconds in
-    print("Wishlist searches occur every \(seconds) seconds")
+for await event in client.events.search.subscribe() {
+    if case .wishlistInterval(let seconds) = event {
+        print("Wishlist searches occur every \(seconds) seconds")
+    }
 }
 ```
 
@@ -100,8 +94,6 @@ result.formattedSize     // "14.2 MB"
 result.formattedDuration // "3:45"
 result.formattedBitrate  // "320 kbps"
 result.formattedSpeed    // "1.2 MB/s"
-result.formattedSampleRate // "44.1 kHz"
-result.formattedBitDepth   // "24-bit"
 ```
 
 ## SearchQuery Model
@@ -150,7 +142,6 @@ try await client.setAcceptDistributedChildren(true)
 // Monitor the state of the distributed network
 client.distributedBranchLevel  // The level of this client in the tree
 client.distributedBranchRoot   // The username of the tree root
-client.distributedChildCount   // The number of child connections
 ```
 
 The distributed network organizes itself. The server assigns the parent nodes. Your client sends searches to its children.

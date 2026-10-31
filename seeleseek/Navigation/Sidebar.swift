@@ -157,7 +157,7 @@ struct SidebarRow: View {
     @Environment(\.appState) private var appState
 
     private var isSelected: Bool {
-        appState.sidebarSelection == item
+        appState.navigation.sidebarSelection == item
     }
 
     private var badgeCount: Int {
@@ -197,7 +197,7 @@ struct SidebarRow: View {
             if item == .wishlists {
                 appState.wishlistState.markResultsViewed()
             }
-            appState.sidebarSelection = item
+            appState.navigation.sidebarSelection = item
         } label: {
             HStack(spacing: SeeleSpacing.sm) {
                 Image(systemName: item.icon)
@@ -252,6 +252,7 @@ struct SidebarRow: View {
     }
 }
 
+#if DEBUG
 #Preview {
     NavigationSplitView {
         Sidebar()
@@ -265,3 +266,4 @@ struct SidebarRow: View {
         return state
     }())
 }
+#endif

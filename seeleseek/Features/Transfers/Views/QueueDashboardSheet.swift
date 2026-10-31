@@ -33,7 +33,7 @@ enum QueueBucket: String, CaseIterable, Identifiable {
         case .transferring: SeeleColors.success
         case .waiting: SeeleColors.info
         case .queued: SeeleColors.warning
-        case .retrying: Color(hex: 0xFB923C)  // orange between warning and error
+        case .retrying: ThemedColor(light: 0xC2410C, dark: 0xFB923C).color  // orange between warning and error
         case .failed: SeeleColors.error
         }
     }
@@ -107,17 +107,8 @@ struct QueueDashboardSheet: View {
                     .foregroundStyle(SeeleColors.textTertiary)
             }
             Spacer()
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: SeeleSpacing.iconSizeMedium))
-                    .foregroundStyle(SeeleColors.textSecondary)
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.cancelAction)
-            .help("Close")
-            .accessibilityLabel("Close")
+            SheetCloseButton { dismiss() }
+                .help("Close")
         }
         .padding(.horizontal, SeeleSpacing.lg)
         .padding(.vertical, SeeleSpacing.md)

@@ -6,7 +6,21 @@ import SeeleseekCore
 @MainActor
 final class SocialState: PeerWatching {
     // MARK: - Buddy List
-    var buddies: [Buddy] = []
+    /// The didSet keeps the core's pushed buddy set in sync; the shares /
+    /// distributed-search handlers gate buddy-only folders against it
+    /// per request. Fires on
+    /// element mutations too (status updates); the recompute is cheap and
+    /// `updateBuddyList` is a plain assignment.
+    var buddies: [Buddy] = [] {
+        didSet { pushBuddyList() }
+    }
+
+    private func pushBuddyList() {
+        let names = Set(buddies.map { $0.username.lowercased() })
+        Task { [weak networkClient] in
+            await networkClient?.updateBuddyList(names)
+        }
+    }
     var selectedBuddy: String?
     var buddySearchQuery: String = ""
     var showAddBuddySheet = false
@@ -44,19 +58,27 @@ final class SocialState: PeerWatching {
     var ignoreSearchQuery: String = ""
     var showIgnoreInput = false
 
-    // MARK: - Leech Detection
-    var leechSettings = LeechSettings()
-    var detectedLeeches: Set<String> = []  // Usernames flagged as leeches
-    var warnedLeeches: Set<String> = []    // Leeches we've already warned/messaged
-
     // MARK: - Profiles
     var viewingProfile: UserProfile?
     var showProfileSheet = false
     var isLoadingProfile = false
 
     // MARK: - My Profile
-    var myDescription: String = ""
-    var myPicture: Data?
+    /// The didSets keep the core's pushed `ProfileData` current — it
+    /// serves UserInfoResponse without calling back into this type.
+    var myDescription: String = "" {
+        didSet { pushProfileData() }
+    }
+    var myPicture: Data? {
+        didSet { pushProfileData() }
+    }
+
+    private func pushProfileData() {
+        let data = ProfileData(description: myDescription, picture: myPicture)
+        Task { [weak networkClient] in
+            await networkClient?.updateProfileData(data)
+        }
+    }
 
     // MARK: - Privileges
     var privilegeTimeRemaining: UInt32 = 0
@@ -120,8 +142,9 @@ final class SocialState: PeerWatching {
         ignoredUsers.contains { $0.username.lowercased() == username.lowercased() }
     }
 
-    func isLeech(_ username: String) -> Bool {
-        detectedLeeches.contains(username)
+    func isBuddy(_ username: String) -> Bool {
+        let needle = username.lowercased()
+        return buddies.contains { $0.username.lowercased() == needle }
     }
 
     // MARK: - Peer Status
@@ -224,83 +247,22 @@ final class SocialState: PeerWatching {
 
     // MARK: - Setup
 
-    func setupCallbacks(client: NetworkClient) {
+    @ObservationIgnored private var socialEventsTask: Task<Void, Never>?
+
+    func wireNetworkEvents(client: NetworkClient) {
         self.networkClient = client
-        logger.info("Setting up social callbacks with NetworkClient...")
 
-        // User status updates (for watched users / buddies)
-        client.addUserStatusHandler { [weak self] username, status, privileged in
-            guard let self else { return }
-            let buddyStatus = BuddyStatus(from: status)
-            // Record live status for any watched peer (buddy or not)
-            self.peerStatuses[username] = buddyStatus
-            self.updateBuddyStatus(username: username, status: status, privileged: privileged)
-            // Also update viewing profile if this is the user we're looking at
-            if self.viewingProfile?.username == username {
-                self.viewingProfile?.status = buddyStatus
-                self.viewingProfile?.isPrivileged = privileged
+        // One serial consumer for the social domain — never per-event
+        // Tasks, so status/stats updates for the same peer can't reorder.
+        // Bounded: a large buddy list coming online floods this channel;
+        // tail-drop past 1024 queued events instead of growing.
+        socialEventsTask?.cancel()
+        let socialEvents = client.events.social.subscribe(bufferingPolicy: .bufferingOldest(1024))
+        socialEventsTask = Task { [weak self] in
+            for await event in socialEvents {
+                guard let self else { return }
+                self.handle(event)
             }
-        }
-
-        // User stats updates (multi-handler pattern)
-        client.addUserStatsHandler { [weak self] username, avgSpeed, uploadNum, files, dirs in
-            guard let self else { return }
-            self.updateBuddyStats(username: username, speed: avgSpeed, files: files, dirs: dirs)
-            // Also update viewing profile if this is the user we're looking at
-            if self.viewingProfile?.username == username {
-                self.viewingProfile?.averageSpeed = avgSpeed
-                self.viewingProfile?.totalUploads = UInt32(uploadNum)
-                self.viewingProfile?.sharedFiles = files
-                self.viewingProfile?.sharedFolders = dirs
-            }
-        }
-
-        // User interests response
-        client.onUserInterests = { [weak self] username, likes, hates in
-            guard let self else { return }
-            self.handleUserInterests(username: username, likes: likes, hates: hates)
-        }
-
-        // Similar users response
-        client.onSimilarUsers = { [weak self] users in
-            guard let self else { return }
-            self.similarUsers = users
-            self.isLoadingSimilar = false
-            self.similarTimeoutTask?.cancel()
-            self.similarTimeoutTask = nil
-            self.logger.info("Received \(users.count) similar users")
-        }
-
-        // Recommendations response
-        client.onRecommendations = { [weak self] recs, unrecs in
-            guard let self else { return }
-            self.recommendations = recs
-            self.unrecommendations = unrecs
-            self.isLoadingRecommendations = false
-            self.recommendationsTimeoutTask?.cancel()
-            self.recommendationsTimeoutTask = nil
-            self.logger.info("Received \(recs.count) recommendations, \(unrecs.count) unrecommendations")
-        }
-
-        // Global recommendations response (network-wide popular interests)
-        client.onGlobalRecommendations = { [weak self] recs, _ in
-            guard let self else { return }
-            self.globalRecommendations = recs
-            self.logger.info("Received \(recs.count) global recommendations")
-        }
-
-        // User privileges response (for viewing profiles)
-        client.onUserPrivileges = { [weak self] username, privileged in
-            guard let self else { return }
-            // Update viewing profile if this is the user we're looking at
-            if self.viewingProfile?.username == username {
-                self.viewingProfile?.isPrivileged = privileged
-            }
-        }
-
-        // Own privilege time remaining
-        client.onPrivilegesChecked = { [weak self] timeLeft in
-            self?.privilegeTimeRemaining = timeLeft
         }
 
         // Country-code resolutions: persist on the buddy record so the
@@ -311,26 +273,71 @@ final class SocialState: PeerWatching {
             self?.handleCountryResolved(username: username, countryCode: code)
         }
 
-        // Provide profile data for UserInfoResponse
-        client.profileDataProvider = { [weak self] in
-            let desc = self?.myDescription ?? ""
-            let description = desc.isEmpty ? "SeeleSeek - Soulseek client for macOS" : desc
-            return (description: description, picture: self?.myPicture)
-        }
-
-        // Incoming UserInfoReply — populate the currently-viewed profile if it matches.
-        // Fires on fresh network replies (both solicited by fetchUserInfo and
-        // unsolicited). Cache-hit paths are handled by applyUserInfo at the
-        // loadProfile call site, since the handler doesn't fire on cached reads.
-        client.addUserInfoHandler { [weak self] username, info in
-            self?.applyUserInfo(info, for: username)
-        }
-
-        logger.info("Social callbacks configured")
+        // Initial pushes — the didSets keep these current from here on.
+        // (Buddies/profile load async after this; their didSets re-push.)
+        pushBuddyList()
+        pushProfileData()
 
         // Load persisted data
         Task {
             await loadPersistedData()
+        }
+    }
+
+    private func handle(_ event: SocialEvent) {
+        switch event {
+        case .userStatus(let username, let status, let privileged):
+            let buddyStatus = BuddyStatus(from: status)
+            // Record live status for any watched peer (buddy or not)
+            peerStatuses[username] = buddyStatus
+            updateBuddyStatus(username: username, status: status, privileged: privileged)
+            // Also update viewing profile if this is the user we're looking at
+            if viewingProfile?.username == username {
+                viewingProfile?.status = buddyStatus
+                viewingProfile?.isPrivileged = privileged
+            }
+        case .userStats(let username, let avgSpeed, let uploadNum, let files, let dirs):
+            updateBuddyStats(username: username, speed: avgSpeed, files: files, dirs: dirs)
+            // Also update viewing profile if this is the user we're looking at
+            if viewingProfile?.username == username {
+                viewingProfile?.averageSpeed = avgSpeed
+                viewingProfile?.totalUploads = UInt32(uploadNum)
+                viewingProfile?.sharedFiles = files
+                viewingProfile?.sharedFolders = dirs
+            }
+        case .userInfoReply(let username, let info):
+            // Populate the currently-viewed profile if it matches. Fires on
+            // fresh network replies (both solicited by fetchUserInfo and
+            // unsolicited). Cache-hit paths are handled by applyUserInfo at
+            // the loadProfile call site, since no event fires on cached reads.
+            applyUserInfo(info, for: username)
+        case .userInterests(let username, let likes, let hates):
+            handleUserInterests(username: username, likes: likes, hates: hates)
+        case .similarUsers(let users):
+            similarUsers = users
+            isLoadingSimilar = false
+            similarTimeoutTask?.cancel()
+            similarTimeoutTask = nil
+            logger.info("Received \(users.count) similar users")
+        case .recommendations(let recs, let unrecs):
+            recommendations = recs
+            unrecommendations = unrecs
+            isLoadingRecommendations = false
+            recommendationsTimeoutTask?.cancel()
+            recommendationsTimeoutTask = nil
+            logger.info("Received \(recs.count) recommendations, \(unrecs.count) unrecommendations")
+        case .globalRecommendations(let recs, _):
+            globalRecommendations = recs
+            logger.info("Received \(recs.count) global recommendations")
+        case .userPrivileges(let username, let privileged):
+            // Update viewing profile if this is the user we're looking at
+            if viewingProfile?.username == username {
+                viewingProfile?.isPrivileged = privileged
+            }
+        case .privilegesChecked(let secondsLeft):
+            privilegeTimeRemaining = secondsLeft
+        case .itemRecommendations, .itemSimilarUsers, .privilegedUsers, .adminMessage:
+            break
         }
     }
 
@@ -383,12 +390,6 @@ final class SocialState: PeerWatching {
                 myPicture = Data(base64Encoded: picBase64)
             }
 
-            // Load leech settings
-            if let leechJson = try await SocialRepository.getProfileSetting("leechSettings"),
-               let data = leechJson.data(using: .utf8) {
-                leechSettings = try JSONDecoder().decode(LeechSettings.self, from: data)
-            }
-
         } catch {
             logger.error("Failed to load persisted social data: \(error.localizedDescription)")
         }
@@ -400,7 +401,7 @@ final class SocialState: PeerWatching {
         // (blocked/ignored/interests/profile/leech) skipped it entirely and
         // silently recreated the stale-buddy-status bug. `watchUser` is
         // idempotent, so overlapping with the event-driven pass is harmless.
-        if networkClient?.isConnected == true {
+        if networkClient?.status.isConnected == true {
             await rewatchAllBuddies()
             await reregisterInterests()
         }
@@ -410,7 +411,7 @@ final class SocialState: PeerWatching {
 
     func addBuddy(_ username: String) async {
         guard !username.isEmpty else { return }
-        guard !buddies.contains(where: { $0.username.lowercased() == username.lowercased() }) else {
+        guard !isBuddy(username) else {
             logger.warning("User \(username) is already a buddy")
             return
         }
@@ -423,24 +424,18 @@ final class SocialState: PeerWatching {
         peerStatuses[username] = buddy.status
 
         // Persist to database
-        Task {
-            do {
-                try await SocialRepository.saveBuddy(buddy)
-                logger.info("Saved buddy \(username) to database")
-            } catch {
-                logger.error("Failed to save buddy: \(error.localizedDescription)")
-            }
+        inTask("save buddy") {
+            try await SocialRepository.saveBuddy(buddy)
+            self.logger.info("Saved buddy \(username) to database")
         }
 
         // Watch user on server (get status updates)
-        do {
+        await attempt("watch user") {
             try await networkClient?.watchUser(username)
             logger.info("Watching user \(username)")
 
             // Request initial status
             await refreshBuddyStatus(username)
-        } catch {
-            logger.error("Failed to watch user: \(error.localizedDescription)")
         }
     }
 
@@ -454,13 +449,9 @@ final class SocialState: PeerWatching {
         }
 
         // Remove from database
-        Task {
-            do {
-                try await SocialRepository.deleteBuddy(username)
-                logger.info("Removed buddy \(username) from database")
-            } catch {
-                logger.error("Failed to remove buddy: \(error.localizedDescription)")
-            }
+        inTask("remove buddy") {
+            try await SocialRepository.deleteBuddy(username)
+            self.logger.info("Removed buddy \(username) from database")
         }
 
         // Unwatch on the server only when nothing else still needs this
@@ -472,16 +463,14 @@ final class SocialState: PeerWatching {
             return
         }
 
-        do {
+        await attempt("unwatch user") {
             try await networkClient?.unwatchUser(username)
             logger.info("Unwatched user \(username)")
-        } catch {
-            logger.error("Failed to unwatch user: \(error.localizedDescription)")
         }
     }
 
     func refreshBuddyStatus(_ username: String) async {
-        do {
+        await attempt("refresh buddy status") {
             // Request user status
             try await networkClient?.getUserStatus(username)
 
@@ -489,8 +478,6 @@ final class SocialState: PeerWatching {
             try await networkClient?.getUserStats(username)
 
             logger.debug("Requested status/stats for \(username)")
-        } catch {
-            logger.error("Failed to refresh buddy status: \(error.localizedDescription)")
         }
     }
 
@@ -512,13 +499,8 @@ final class SocialState: PeerWatching {
         guard changed else { return }
 
         // Update in database
-        Task {
-            do {
-                try await SocialRepository.saveBuddy(buddies[index])
-            } catch {
-                logger.error("Failed to update buddy status in database: \(error.localizedDescription)")
-            }
-        }
+        let buddy = buddies[index]
+        inTask("update buddy status in database") { try await SocialRepository.saveBuddy(buddy) }
     }
 
     /// Persist a freshly-resolved country code on the buddy record (if
@@ -530,13 +512,7 @@ final class SocialState: PeerWatching {
            buddies[index].countryCode != countryCode {
             buddies[index].countryCode = countryCode
             let snapshot = buddies[index]
-            Task {
-                do {
-                    try await SocialRepository.saveBuddy(snapshot)
-                } catch {
-                    logger.error("Failed to persist country for \(username): \(error.localizedDescription)")
-                }
-            }
+            inTask("persist country for \(username)") { try await SocialRepository.saveBuddy(snapshot) }
         }
         if viewingProfile?.username == username {
             viewingProfile?.countryCode = countryCode
@@ -549,20 +525,6 @@ final class SocialState: PeerWatching {
         buddies[index].averageSpeed = speed
         buddies[index].fileCount = files
         buddies[index].folderCount = dirs
-    }
-
-    func updateBuddyNotes(_ username: String, notes: String) {
-        guard let index = buddies.firstIndex(where: { $0.username == username }) else { return }
-
-        buddies[index].notes = notes.isEmpty ? nil : notes
-
-        Task {
-            do {
-                try await SocialRepository.saveBuddy(buddies[index])
-            } catch {
-                logger.error("Failed to save buddy notes: \(error.localizedDescription)")
-            }
-        }
     }
 
     // MARK: - Profile Actions
@@ -588,20 +550,18 @@ final class SocialState: PeerWatching {
         // Viewing our own profile: populate the local description+picture directly.
         // The Soulseek protocol has no way to fetch this from the server — other
         // users learn these values only by asking *us* via UserInfoRequest.
-        let isOwnProfile = (networkClient?.username ?? "") == username && !username.isEmpty
+        let isOwnProfile = (networkClient?.status.username ?? "") == username && !username.isEmpty
         if isOwnProfile {
             viewingProfile?.description = myDescription
             viewingProfile?.picture = myPicture
         }
 
-        do {
+        await attempt("load profile") {
             try await networkClient?.getUserStatus(username)
             try await networkClient?.getUserInterests(username)
             try await networkClient?.getUserStats(username)
             try await networkClient?.getUserPrivileges(username)
             logger.info("Requested profile data for \(username)")
-        } catch {
-            logger.error("Failed to load profile: \(error.localizedDescription)")
         }
 
         isLoadingProfile = false
@@ -612,7 +572,7 @@ final class SocialState: PeerWatching {
         // Skipped for our own profile (can't peer-connect to ourselves).
         //
         // We apply the result directly instead of relying only on the handler
-        // registered in setupCallbacks — the handler fires on fresh replies but
+        // registered in wireNetworkEvents — the handler fires on fresh replies but
         // NOT on cache hits, which is what made re-opening the same profile
         // appear empty the second time.
         if !isOwnProfile, let client = networkClient {
@@ -657,7 +617,7 @@ final class SocialState: PeerWatching {
     }
 
     func saveMyProfile() async {
-        do {
+        await attempt("save profile") {
             try await SocialRepository.setProfileSetting("description", value: myDescription)
             if let pictureData = myPicture {
                 try await SocialRepository.setProfileSetting("picture", value: pictureData.base64EncodedString())
@@ -665,8 +625,6 @@ final class SocialState: PeerWatching {
                 try await SocialRepository.deleteProfileSetting("picture")
             }
             logger.info("Saved profile")
-        } catch {
-            logger.error("Failed to save profile: \(error.localizedDescription)")
         }
     }
 
@@ -679,24 +637,16 @@ final class SocialState: PeerWatching {
         myLikes.append(item)
 
         // Save to database
-        Task {
-            do {
-                try await SocialRepository.saveInterest(item, type: .like)
-            } catch {
-                logger.error("Failed to save like: \(error.localizedDescription)")
-            }
-        }
+        inTask("save like") { try await SocialRepository.saveInterest(item, type: .like) }
 
         // Send to server
-        do {
+        await attempt("add like on server") {
             try await networkClient?.addThingILike(item)
             logger.info("Added like: \(item)")
 
             // Auto-refresh recommendations after adding an interest
             try await networkClient?.getRecommendations()
             try await networkClient?.getSimilarUsers()
-        } catch {
-            logger.error("Failed to add like on server: \(error.localizedDescription)")
         }
     }
 
@@ -704,20 +654,12 @@ final class SocialState: PeerWatching {
         myLikes.removeAll { $0 == item }
 
         // Remove from database
-        Task {
-            do {
-                try await SocialRepository.deleteInterest(item)
-            } catch {
-                logger.error("Failed to remove like from database: \(error.localizedDescription)")
-            }
-        }
+        inTask("remove like from database") { try await SocialRepository.deleteInterest(item) }
 
         // Remove from server
-        do {
+        await attempt("remove like on server") {
             try await networkClient?.removeThingILike(item)
             logger.info("Removed like: \(item)")
-        } catch {
-            logger.error("Failed to remove like on server: \(error.localizedDescription)")
         }
     }
 
@@ -728,24 +670,16 @@ final class SocialState: PeerWatching {
         myHates.append(item)
 
         // Save to database
-        Task {
-            do {
-                try await SocialRepository.saveInterest(item, type: .hate)
-            } catch {
-                logger.error("Failed to save hate: \(error.localizedDescription)")
-            }
-        }
+        inTask("save hate") { try await SocialRepository.saveInterest(item, type: .hate) }
 
         // Send to server
-        do {
+        await attempt("add hate on server") {
             try await networkClient?.addThingIHate(item)
             logger.info("Added hate: \(item)")
 
             // Auto-refresh recommendations after adding an interest
             try await networkClient?.getRecommendations()
             try await networkClient?.getSimilarUsers()
-        } catch {
-            logger.error("Failed to add hate on server: \(error.localizedDescription)")
         }
     }
 
@@ -753,43 +687,25 @@ final class SocialState: PeerWatching {
         myHates.removeAll { $0 == item }
 
         // Remove from database
-        Task {
-            do {
-                try await SocialRepository.deleteInterest(item)
-            } catch {
-                logger.error("Failed to remove hate from database: \(error.localizedDescription)")
-            }
-        }
+        inTask("remove hate from database") { try await SocialRepository.deleteInterest(item) }
 
         // Remove from server
-        do {
+        await attempt("remove hate on server") {
             try await networkClient?.removeThingIHate(item)
             logger.info("Removed hate: \(item)")
-        } catch {
-            logger.error("Failed to remove hate on server: \(error.localizedDescription)")
         }
     }
 
     // MARK: - Privilege Actions
 
     func checkPrivileges() {
-        Task {
-            do {
-                try await networkClient?.checkPrivileges()
-            } catch {
-                logger.error("Failed to check privileges: \(error.localizedDescription)")
-            }
-        }
+        inTask("check privileges") { try await self.networkClient?.checkPrivileges() }
     }
 
     func givePrivileges(to username: String, days: UInt32) {
-        Task {
-            do {
-                try await networkClient?.givePrivileges(to: username, days: days)
-                logger.info("Gave \(days) days of privileges to \(username)")
-            } catch {
-                logger.error("Failed to give privileges: \(error.localizedDescription)")
-            }
+        inTask("give privileges") {
+            try await self.networkClient?.givePrivileges(to: username, days: days)
+            self.logger.info("Gave \(days) days of privileges to \(username)")
         }
     }
 
@@ -817,7 +733,7 @@ final class SocialState: PeerWatching {
             logger.info("Requested similar users")
             // The server can silently never reply — clear the flag after a
             // timeout so the spinner doesn't spin forever. The response
-            // callback (setupCallbacks) clears the flag on success.
+            // callback (wireNetworkEvents) clears the flag on success.
             similarTimeoutTask?.cancel()
             similarTimeoutTask = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(15))
@@ -862,11 +778,9 @@ final class SocialState: PeerWatching {
 
     func rewatchAllBuddies() async {
         for buddy in buddies {
-            do {
+            await attempt("rewatch \(buddy.username)") {
                 try await networkClient?.watchUser(buddy.username)
                 try await networkClient?.getUserStatus(buddy.username)
-            } catch {
-                logger.error("Failed to rewatch \(buddy.username): \(error.localizedDescription)")
             }
         }
 
@@ -882,19 +796,15 @@ final class SocialState: PeerWatching {
 
         var registered = 0
         for like in myLikes {
-            do {
+            await attempt("re-register like '\(like)'") {
                 try await networkClient.addThingILike(like)
                 registered += 1
-            } catch {
-                logger.error("Failed to re-register like '\(like)': \(error.localizedDescription)")
             }
         }
         for hate in myHates {
-            do {
+            await attempt("re-register hate '\(hate)'") {
                 try await networkClient.addThingIHate(hate)
                 registered += 1
-            } catch {
-                logger.error("Failed to re-register hate '\(hate)': \(error.localizedDescription)")
             }
         }
 
@@ -910,11 +820,9 @@ final class SocialState: PeerWatching {
         blockedUsers.append(blocked)
 
         // Persist to database
-        do {
+        await attempt("save blocked user") {
             try await SocialRepository.saveBlockedUser(blocked)
             logger.info("Blocked user \(username)")
-        } catch {
-            logger.error("Failed to save blocked user: \(error.localizedDescription)")
         }
 
         // Note: Server-side ignore (code 11) is obsolete in the protocol
@@ -925,11 +833,9 @@ final class SocialState: PeerWatching {
         blockedUsers.removeAll { $0.username.lowercased() == username.lowercased() }
 
         // Remove from database
-        do {
+        await attempt("remove blocked user") {
             try await SocialRepository.deleteBlockedUser(username)
             logger.info("Unblocked user \(username)")
-        } catch {
-            logger.error("Failed to remove blocked user: \(error.localizedDescription)")
         }
     }
 
@@ -940,11 +846,7 @@ final class SocialState: PeerWatching {
         guard !trimmed.isEmpty else { return }
         guard !isIgnored(trimmed) else { return }
 
-        do {
-            try await networkClient?.ignoreUser(trimmed)
-        } catch {
-            logger.error("Failed to ignore user on server: \(error.localizedDescription)")
-        }
+        await attempt("ignore user on server") { try await networkClient?.ignoreUser(trimmed) }
 
         ignoredUsers.append(IgnoredUser(username: trimmed, reason: reason))
         await persistIgnoredUsers()
@@ -955,11 +857,7 @@ final class SocialState: PeerWatching {
         let trimmed = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        do {
-            try await networkClient?.unignoreUser(trimmed)
-        } catch {
-            logger.error("Failed to unignore user on server: \(error.localizedDescription)")
-        }
+        await attempt("unignore user on server") { try await networkClient?.unignoreUser(trimmed) }
 
         ignoredUsers.removeAll { $0.username.lowercased() == trimmed.lowercased() }
         await persistIgnoredUsers()
@@ -967,95 +865,30 @@ final class SocialState: PeerWatching {
     }
 
     private func persistIgnoredUsers() async {
-        do {
+        await attempt("persist ignored users") {
             let data = try JSONEncoder().encode(ignoredUsers)
             if let json = String(data: data, encoding: .utf8) {
                 try await SocialRepository.setProfileSetting("ignoredUsers", value: json)
             }
-        } catch {
-            logger.error("Failed to persist ignored users: \(error.localizedDescription)")
         }
     }
 
-    // MARK: - Leech Detection
+    // MARK: - Error-logged helpers
 
-    /// Check if a user is a leech based on their stats
-    func checkForLeech(username: String, files: UInt32, folders: UInt32) {
-        guard leechSettings.enabled else { return }
-        guard !isBlocked(username) else { return }
-
-        let isLeech = files < leechSettings.minSharedFiles || folders < leechSettings.minSharedFolders
-
-        if isLeech {
-            if !detectedLeeches.contains(username) {
-                detectedLeeches.insert(username)
-                logger.info("Detected leech: \(username) (files: \(files), folders: \(folders))")
-
-                // Take action based on settings
-                handleLeechDetected(username: username)
-            }
-        } else {
-            // User is no longer a leech (they started sharing)
-            detectedLeeches.remove(username)
-            warnedLeeches.remove(username)
+    /// Run `body` in a Task; a failure is logged, never surfaced.
+    private func inTask(_ what: String, _ body: @escaping () async throws -> Void) {
+        Task {
+            await attempt(what, body)
         }
     }
 
-    private func handleLeechDetected(username: String) {
-        switch leechSettings.action {
-        case .ignore:
-            // Just track, no action
-            break
-
-        case .warn:
-            // UI will show warning indicator
-            break
-
-        case .message:
-            // Send a polite message (only once per session)
-            if !warnedLeeches.contains(username) {
-                warnedLeeches.insert(username)
-                Task {
-                    try? await networkClient?.sendPrivateMessage(to: username, message: leechSettings.customMessage)
-                    logger.info("Sent leech warning to \(username)")
-                }
-            }
-
-        case .deny:
-            // Upload manager will check isLeech() before allowing transfers
-            break
-
-        case .block:
-            Task {
-                await blockUser(username, reason: "Auto-blocked: No shared files")
-            }
-        }
-    }
-
-    /// Check if we should allow uploads to this user
-    func shouldAllowUpload(to username: String) -> Bool {
-        // Always deny if blocked
-        if isBlocked(username) {
-            return false
-        }
-
-        // Deny if leech and action is deny
-        if leechSettings.enabled && leechSettings.action == .deny && isLeech(username) {
-            return false
-        }
-
-        return true
-    }
-
-    func saveLeechSettings() async {
+    /// Run `body`, logging a thrown error as "Failed to `what`".
+    private func attempt(_ what: String, _ body: () async throws -> Void) async {
         do {
-            let data = try JSONEncoder().encode(leechSettings)
-            if let json = String(data: data, encoding: .utf8) {
-                try await SocialRepository.setProfileSetting("leechSettings", value: json)
-                logger.info("Saved leech settings")
-            }
+            try await body()
         } catch {
-            logger.error("Failed to save leech settings: \(error.localizedDescription)")
+            logger.error("Failed to \(what): \(error.localizedDescription)")
         }
     }
+
 }

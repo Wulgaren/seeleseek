@@ -147,7 +147,7 @@ struct MenuBarView: View {
     }
 
     private func open(_ item: SidebarItem) {
-        appState.sidebarSelection = item
+        appState.navigation.sidebarSelection = item
         openMainWindow()
     }
 

@@ -56,6 +56,15 @@ struct SeeleSeekApp: App {
                             DemoDataSeeder.seed(into: appState)
                             return
                         }
+                        if SyntheticSearchDriver.isEnabled {
+                            SyntheticSearchDriver.start(appState: appState)
+                            return
+                        }
+                        if SyntheticSearchDriver.isLiveEnabled {
+                            appState.configure()
+                            SyntheticSearchDriver.startLive(appState: appState)
+                            return
+                        }
                         #endif
                         appState.configure()
                         SeeleSeekShortcuts.updateAppShortcutParameters()
@@ -71,7 +80,7 @@ struct SeeleSeekApp: App {
             TabNavigationCommands()
             CommandGroup(after: .textEditing) {
                 Button("Find") {
-                    appState.requestSearchFieldFocus()
+                    appState.navigation.requestSearchFieldFocus()
                 }
                 .keyboardShortcut("f", modifiers: .command)
             }
@@ -91,7 +100,7 @@ struct SeeleSeekApp: App {
                 Divider()
 
                 Button("Disconnect") {
-                    appState.networkClient.disconnect()
+                    Task { await appState.networkClient.disconnect() }
                     appState.connection.setDisconnected()
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
@@ -99,46 +108,46 @@ struct SeeleSeekApp: App {
             }
             CommandMenu("Navigate") {
                 Button("Search") {
-                    appState.sidebarSelection = .search
+                    appState.navigation.navigate(to: .search)
                 }
                 .keyboardShortcut("1", modifiers: .command)
                 
                 Button("Wishlists") {
-                    appState.sidebarSelection = .wishlists
+                    appState.navigation.navigate(to: .wishlists)
                 }
                 .keyboardShortcut("2", modifiers: .command)
 
                 Button("Transfers") {
-                    appState.sidebarSelection = .transfers
+                    appState.navigation.navigate(to: .transfers())
                 }
                 .keyboardShortcut("3", modifiers: .command)
 
                 Button("Browse") {
-                    appState.sidebarSelection = .browse
+                    appState.navigation.navigate(to: .browse)
                 }
                 .keyboardShortcut("4", modifiers: .command)
 
                 Button("Social") {
-                    appState.sidebarSelection = .social
+                    appState.navigation.navigate(to: .social())
                 }
                 .keyboardShortcut("5", modifiers: .command)
 
                 Button("Chat") {
-                    appState.sidebarSelection = .chat
+                    appState.navigation.navigate(to: .chat)
                 }
                 .keyboardShortcut("6", modifiers: .command)
 
                 Divider()
 
                 Button("Activity") {
-                    appState.sidebarSelection = .networkMonitor
+                    appState.navigation.navigate(to: .networkMonitor())
                 }
                 .keyboardShortcut("7", modifiers: .command)
 
                 Divider()
 
                 Button("Settings") {
-                    appState.sidebarSelection = .settings
+                    appState.navigation.navigate(to: .settings())
                 }
                 .keyboardShortcut("9", modifiers: .command)
             }
@@ -149,6 +158,7 @@ struct SeeleSeekApp: App {
         Window("Update Available", id: "update-prompt") {
             UpdatePromptSheet(updateState: appState.updateState)
                 .environment(\.appState, appState)
+                .preferredColorScheme(appState.settings.appearance.colorScheme)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
@@ -156,10 +166,13 @@ struct SeeleSeekApp: App {
         .commandsRemoved()
 
         Settings {
-            SettingsView()
+            SettingsWindowView()
                 .environment(\.appState, appState)
-                .frame(minWidth: 700, minHeight: 500)
+                .frame(minWidth: 700, idealWidth: 700, minHeight: 500, idealHeight: 500)
+                .toolbar(removing: .title)
+                .preferredColorScheme(appState.settings.appearance.colorScheme)
         }
+        .windowResizability(.contentMinSize)
 
         MenuBarExtra("SeeleSeek", image: .gsgaag2Menubar2, isInserted: $appState.settings.showInMenuBar) {
             MenuBarView()

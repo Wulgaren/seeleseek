@@ -121,11 +121,12 @@ struct ConnectionStatusView: View {
     }
 
     private func disconnect() {
-        appState.networkClient.disconnect()
+        Task { await appState.networkClient.disconnect() }
         appState.connection.setDisconnected()
     }
 }
 
+#if DEBUG
 #Preview("Connected") {
     let state = AppState()
     state.connection.setConnected(
@@ -150,3 +151,4 @@ struct ConnectionStatusView: View {
     return ConnectionStatusView()
         .environment(\.appState, state)
 }
+#endif

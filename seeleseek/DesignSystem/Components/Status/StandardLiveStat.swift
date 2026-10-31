@@ -20,13 +20,16 @@ struct StandardLiveStat: View {
                 .font(SeeleTypography.mono)
                 .foregroundStyle(SeeleColors.textSecondary)
                 .contentTransition(.numericText())
+                .lineLimit(1)
         }
+        .fixedSize(horizontal: true, vertical: false)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(.isStaticText)
     }
 }
 
+#if DEBUG
 #Preview {
     HStack(spacing: SeeleSpacing.lg) {
         StandardLiveStat(
@@ -44,3 +47,4 @@ struct StandardLiveStat: View {
     .padding()
     .background(SeeleColors.background)
 }
+#endif

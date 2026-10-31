@@ -5,6 +5,10 @@ struct PrivacySettingsSection: View {
     @Bindable var settings: SettingsState
     @Environment(\.appState) private var appState
 
+    private var leech: LeechDetector {
+        appState.leechDetector
+    }
+
     private var socialState: SocialState {
         appState.socialState
     }
@@ -78,6 +82,8 @@ struct PrivacySettingsSection: View {
                         Button("Add", action: addPattern)
                             .buttonStyle(.seelePrimary(.small))
                             .disabled(trimmedNewPattern.isEmpty)
+
+                        Spacer()
                     }
                 }
                 .disabled(!settings.blockLeechPatternsEnabled)
@@ -260,141 +266,20 @@ struct PrivacySettingsSection: View {
 
                 Spacer()
 
-                if socialState.leechSettings.enabled && !socialState.detectedLeeches.isEmpty {
-                    Text("\(socialState.detectedLeeches.count) detected")
+                if leech.settings.enabled && !leech.detectedLeechers.isEmpty {
+                    Text("\(leech.detectedLeechers.count) detected")
                         .font(SeeleTypography.caption)
                         .foregroundStyle(SeeleColors.warning)
                 }
             }
 
-            settingsGroup("Detection") {
-                settingsRow {
-                    HStack {
-                        VStack(alignment: .leading, spacing: SeeleSpacing.xs) {
-                            Text("Enable Leech Detection")
-                                .font(SeeleTypography.body)
-                                .foregroundStyle(SeeleColors.textPrimary)
-                                .accessibilityHidden(true)
+            LeechRuleGroup(leech: leech)
 
-                            Text("Detect users who download without sharing files")
-                                .font(SeeleTypography.caption)
-                                .foregroundStyle(SeeleColors.textSecondary)
-                        }
-
-                        Spacer()
-
-                        Toggle("", isOn: Bindable(socialState).leechSettings.enabled)
-                            .toggleStyle(SeeleToggleStyle())
-                            .labelsHidden()
-                            .accessibilityLabel("Enable Leech Detection")
-                            .onChange(of: socialState.leechSettings.enabled) { _, _ in
-                                Task { await socialState.saveLeechSettings() }
-                            }
-                    }
-                }
-            }
-
-            settingsGroup("Detection Thresholds") {
-                settingsRow {
-                    HStack {
-                        Text("Minimum shared files")
-                            .font(SeeleTypography.body)
-                            .foregroundStyle(SeeleColors.textPrimary)
-                            .accessibilityHidden(true)
-
-                        Spacer()
-
-                        TextField("", value: Bindable(socialState).leechSettings.minSharedFiles, format: .number)
-                            .textFieldStyle(SeeleTextFieldStyle())
-                            .frame(width: 80)
-                            .multilineTextAlignment(.trailing)
-                            .accessibilityLabel("Minimum shared files")
-                            .onChange(of: socialState.leechSettings.minSharedFiles) { _, _ in
-                                Task { await socialState.saveLeechSettings() }
-                            }
-                    }
-                }
-                settingsRow {
-                    HStack {
-                        Text("Minimum shared folders")
-                            .font(SeeleTypography.body)
-                            .foregroundStyle(SeeleColors.textPrimary)
-                            .accessibilityHidden(true)
-
-                        Spacer()
-
-                        TextField("", value: Bindable(socialState).leechSettings.minSharedFolders, format: .number)
-                            .textFieldStyle(SeeleTextFieldStyle())
-                            .frame(width: 80)
-                            .multilineTextAlignment(.trailing)
-                            .accessibilityLabel("Minimum shared folders")
-                            .onChange(of: socialState.leechSettings.minSharedFolders) { _, _ in
-                                Task { await socialState.saveLeechSettings() }
-                            }
-                    }
-                }
-                settingsCaption("Users with fewer shares than these thresholds are considered leeches")
-            }
-            .opacity(socialState.leechSettings.enabled ? 1 : 0.5)
-            .disabled(!socialState.leechSettings.enabled)
-
-            settingsGroup("Action") {
-                ForEach(LeechAction.allCases, id: \.self) { action in
-                    leechActionRow(action)
-                }
-            }
-            .opacity(socialState.leechSettings.enabled ? 1 : 0.5)
-            .disabled(!socialState.leechSettings.enabled)
-
-            settingsGroup("Custom Message") {
-                settingsRow {
-                    VStack(alignment: .leading, spacing: SeeleSpacing.sm) {
-                        TextEditor(text: Bindable(socialState).leechSettings.customMessage)
-                            .accessibilityLabel("Custom leech message")
-                            .font(SeeleTypography.body)
-                            .foregroundStyle(SeeleColors.textPrimary)
-                            .scrollContentBackground(.hidden)
-                            .padding(SeeleSpacing.sm)
-                            .background(SeeleColors.surfaceSecondary)
-                            .clipShape(RoundedRectangle(cornerRadius: SeeleSpacing.radiusMD / 2))
-                            .frame(height: 80)
-                            .onChange(of: socialState.leechSettings.customMessage) { _, _ in
-                                Task { await socialState.saveLeechSettings() }
-                            }
-
-                        Text("This message is sent to leeches when action is set to \"Send message\"")
-                            .font(SeeleTypography.caption)
-                            .foregroundStyle(SeeleColors.textTertiary)
-
-                        FlowLayout(spacing: SeeleSpacing.xs) {
-                            ForEach(LeechSettings.defaultMessages.indices, id: \.self) { index in
-                                Button {
-                                    socialState.leechSettings.customMessage = LeechSettings.defaultMessages[index]
-                                    Task { await socialState.saveLeechSettings() }
-                                } label: {
-                                    Text("Template \(index + 1)")
-                                        .font(SeeleTypography.caption)
-                                        .foregroundStyle(SeeleColors.accent)
-                                        .padding(.horizontal, SeeleSpacing.sm)
-                                        .padding(.vertical, SeeleSpacing.xs)
-                                        .background(SeeleColors.accent.opacity(0.1), in: Capsule())
-                                        .contentShape(Capsule())
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityHint("Replaces the custom message with this template")
-                            }
-                        }
-                    }
-                }
-            }
-            .opacity(socialState.leechSettings.enabled && socialState.leechSettings.action == .message ? 1 : 0.5)
-            .disabled(!socialState.leechSettings.enabled || socialState.leechSettings.action != .message)
-
-            if socialState.leechSettings.enabled {
-                settingsGroup("Detected Leeches (this session)") {
-                    if socialState.detectedLeeches.isEmpty {
+            if leech.settings.enabled {
+                settingsGroup("Detected Leechers") {
+                    if leech.detectedLeechers.isEmpty {
                         settingsRow {
-                            Text("No leeches detected in this session")
+                            Text("No leechers detected")
                                 .font(SeeleTypography.body)
                                 .foregroundStyle(SeeleColors.textTertiary)
                                 .frame(maxWidth: .infinity, alignment: .center)
@@ -404,61 +289,20 @@ struct PrivacySettingsSection: View {
                             HStack {
                                 Spacer()
                                 Button("Clear") {
-                                    socialState.detectedLeeches.removeAll()
-                                    socialState.warnedLeeches.removeAll()
+                                    leech.clearDetected()
                                 }
                                 .buttonStyle(.plain)
                                 .font(SeeleTypography.caption)
                                 .foregroundStyle(SeeleColors.accent)
                             }
                         }
-                        ForEach(Array(socialState.detectedLeeches).sorted(), id: \.self) { username in
+                        ForEach(Array(leech.detectedLeechers).sorted(), id: \.self) { username in
                             leechRow(username)
                         }
                     }
                 }
             }
         }
-    }
-
-    private func leechActionRow(_ action: LeechAction) -> some View {
-        Button {
-            socialState.leechSettings.action = action
-            Task { await socialState.saveLeechSettings() }
-        } label: {
-            settingsRow {
-                HStack(spacing: SeeleSpacing.md) {
-                    Image(systemName: socialState.leechSettings.action == action ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(socialState.leechSettings.action == action ? SeeleColors.accent : SeeleColors.textTertiary)
-                        .accessibilityHidden(true)
-
-                    VStack(alignment: .leading, spacing: SeeleSpacing.xxs) {
-                        Text(action.displayName)
-                            .font(SeeleTypography.body)
-                            .foregroundStyle(SeeleColors.textPrimary)
-
-                        Text(action.description)
-                            .font(SeeleTypography.caption)
-                            .foregroundStyle(SeeleColors.textSecondary)
-                    }
-
-                    Spacer()
-                }
-                .padding(.horizontal, SeeleSpacing.xs)
-                .padding(.vertical, SeeleSpacing.rowVertical)
-                .background(socialState.leechSettings.action == action ? SeeleColors.accent.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: SeeleSpacing.radiusSM, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: SeeleSpacing.radiusSM, style: .continuous)
-                        .stroke(socialState.leechSettings.action == action ? SeeleColors.selectionBorder : Color.clear, lineWidth: 1)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: SeeleSpacing.radiusSM, style: .continuous))
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(action.displayName)
-        .accessibilityHint(action.description)
-        .accessibilityAddTraits(socialState.leechSettings.action == action ? [.isSelected] : [])
     }
 
     private func leechRow(_ username: String) -> some View {
@@ -468,12 +312,20 @@ struct PrivacySettingsSection: View {
                     .foregroundStyle(SeeleColors.warning)
                     .accessibilityHidden(true)
 
-                Text(username)
-                    .font(SeeleTypography.body)
-                    .foregroundStyle(SeeleColors.textPrimary)
+                VStack(alignment: .leading, spacing: SeeleSpacing.xxs) {
+                    Text(username)
+                        .font(SeeleTypography.body)
+                        .foregroundStyle(SeeleColors.textPrimary)
 
-                if socialState.warnedLeeches.contains(username) {
-                    Text("warned")
+                    if let counts = leech.shareCounts[username] {
+                        Text("\(counts.files) files in \(counts.folders) folders")
+                            .font(SeeleTypography.caption)
+                            .foregroundStyle(SeeleColors.textTertiary)
+                    }
+                }
+
+                if leech.messagedLeechers.contains(username) {
+                    Text("messaged")
                         .font(SeeleTypography.caption)
                         .foregroundStyle(SeeleColors.textTertiary)
                         .padding(.horizontal, SeeleSpacing.xs)
@@ -483,11 +335,15 @@ struct PrivacySettingsSection: View {
 
                 Spacer()
 
+                Button("Forget") {
+                    leech.forget(username)
+                }
+                .buttonStyle(.seeleSecondary(.small))
+                .accessibilityLabel("Forget \(username)")
+                .accessibilityHint("Removes the user from the list until they are checked again")
+
                 Button("Block", role: .destructive) {
-                    Task {
-                        await socialState.blockUser(username, reason: "Leech - no shared files")
-                        socialState.detectedLeeches.remove(username)
-                    }
+                    Task { await leech.block(username) }
                 }
                 .buttonStyle(.seeleSecondary(.small))
                 .accessibilityLabel("Block \(username)")
@@ -496,12 +352,18 @@ struct PrivacySettingsSection: View {
     }
 }
 
+#if DEBUG
 #Preview {
-    ScrollView {
+    let appState = AppState()
+    appState.leechDetector.settings.enabled = true
+    appState.leechDetector.settings.denyDownloads = true
+    appState.leechDetector.settings.sendMessage = true
+    return ScrollView {
         PrivacySettingsSection(settings: SettingsState())
             .padding()
     }
-    .environment(\.appState, AppState())
+    .environment(\.appState, appState)
     .frame(width: 500, height: 600)
     .background(SeeleColors.background)
 }
+#endif

@@ -80,8 +80,10 @@ struct StandardTabBar<Tab: Hashable & CaseIterable & RawRepresentable, Trailing:
         case .horizontal:
             HStack(spacing: SeeleSpacing.sm) {
                 ForEach(tabs, id: \.self) { tabButton(for: $0) }
-                Spacer()
-                trailing
+                HStack(spacing: SeeleSpacing.sm) {
+                    trailing
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
             }
             // Same outer metrics as StandardActionBar: a view's header slot
             // is the same height whether it leads with tabs or controls (#67).
@@ -166,6 +168,8 @@ struct StandardTabBar<Tab: Hashable & CaseIterable & RawRepresentable, Trailing:
 
                 if axis == .vertical { Spacer(minLength: 0) }
             }
+            .lineLimit(1)
+            .fixedSize(horizontal: axis == .horizontal, vertical: false)
             .foregroundStyle(isSelected ? SeeleColors.textPrimary : SeeleColors.textSecondary)
             .padding(.horizontal, SeeleSpacing.md)
             .padding(.vertical, SeeleSpacing.sm)
@@ -211,6 +215,7 @@ extension StandardTabBar where Trailing == EmptyView {
     }
 }
 
+#if DEBUG
 #Preview {
     enum PreviewTab: String, Hashable, CaseIterable {
         case downloads = "Downloads"
@@ -238,3 +243,4 @@ extension StandardTabBar where Trailing == EmptyView {
 
     return Preview()
 }
+#endif

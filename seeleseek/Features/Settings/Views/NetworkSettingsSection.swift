@@ -19,7 +19,7 @@ struct NetworkSettingsSection: View {
     @FocusState private var listenPortFocused: Bool
 
     /// Port the listener is currently bound to (0 when offline).
-    private var boundPort: Int { Int(appState.networkClient.listenPort) }
+    private var boundPort: Int { Int(appState.networkClient.status.listenPort) }
 
     /// True when the user has typed a port that differs from what the
     /// listener is actually bound to *and* there's a live session to
@@ -219,6 +219,7 @@ struct NetworkSettingsSection: View {
     }
 }
 
+#if DEBUG
 #Preview {
     ScrollView {
         NetworkSettingsSection(settings: SettingsState())
@@ -227,3 +228,4 @@ struct NetworkSettingsSection: View {
     .frame(width: 500, height: 400)
     .background(SeeleColors.background)
 }
+#endif

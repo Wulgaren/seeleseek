@@ -2,10 +2,22 @@ import Foundation
 
 // MARK: - Byte counts
 
+// Not `formatted(.byteCount)`: that builds an AttributedString per call
+// and search rows format sizes in `body`. NSFormatter is not documented
+// thread-safe and Core callers can be off-main, hence the lock.
+nonisolated(unsafe) private let byteCountFormatter: ByteCountFormatter = {
+    let f = ByteCountFormatter()
+    f.countStyle = .file
+    return f
+}()
+private let byteCountLock = NSLock()
+
 public extension Int64 {
     var formattedBytes: String {
         guard self > 0 else { return "0 KB" }
-        return formatted(.byteCount(style: .file))
+        byteCountLock.lock()
+        defer { byteCountLock.unlock() }
+        return byteCountFormatter.string(fromByteCount: self)
     }
     var formattedSpeed: String { formattedBytes + "/s" }
 }
@@ -56,13 +68,6 @@ public extension Date {
     /// Compact elapsed time since this date (e.g., "5m 30s").
     var durationSinceNow: String {
         Date().timeIntervalSince(self).formattedDuration
-    }
-}
-
-public extension Int {
-    /// Audio track duration as MM:SS.
-    var formattedAudioDuration: String {
-        Duration.seconds(self).formatted(.time(pattern: .minuteSecond))
     }
 }
 

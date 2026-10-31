@@ -3,55 +3,30 @@ import SeeleseekCore
 
 struct SettingsView: View {
     @Environment(\.appState) private var appState
-    @State private var selectedTab: SettingsTab = .general
-
-    enum SettingsTab: String, CaseIterable {
-        case profile = "Profile"
-        case general = "General"
-        case network = "Network"
-        case shares = "Shares"
-        case metadata = "Metadata"
-        case chat = "Chat"
-        case notifications = "Notifications"
-        case privacy = "Privacy"
-        case diagnostics = "Diagnostics"
-        case update = "Update"
-        case about = "About"
-
-        var icon: String {
-            switch self {
-            case .profile: "person.crop.circle"
-            case .general: "gear"
-            case .network: "network"
-            case .shares: "folder"
-            case .metadata: "music.note"
-            case .chat: "bubble.left"
-            case .notifications: "bell"
-            case .privacy: "lock.shield"
-            case .diagnostics: "ant"
-            case .update: "arrow.triangle.2.circlepath"
-            case .about: "info.circle"
-            }
-        }
-    }
+    @Binding var selection: SettingsTab
 
     var body: some View {
-        HSplitView {
+        HStack(spacing: 0) {
             StandardTabBar(
-                selection: $selectedTab,
+                selection: $selection,
                 axis: .vertical,
                 showsBackground: false,
                 icon: { $0.icon }
             )
             .frame(width: 180)
-            .background(SeeleColors.surface)
+            .background(SeeleColors.surface.ignoresSafeArea())
+            .overlay(alignment: .trailing) {
+                Rectangle()
+                    .fill(SeeleColors.border)
+                    .frame(width: 1)
+                    .ignoresSafeArea()
+            }
 
-            // Content
             ScrollView {
                 VStack(alignment: .leading, spacing: SeeleSpacing.lg) {
-                    switch selectedTab {
+                    switch selection {
                     case .profile:
-                        MyProfileView()
+                        UserProfileSettingsSection()
                     case .general:
                         GeneralSettingsSection(settings: appState.settings)
                     case .network:
@@ -69,23 +44,35 @@ struct SettingsView: View {
                     case .diagnostics:
                         DiagnosticsSection()
                     case .update:
-                        UpdateSettingsSection(updateState: appState.updateState)
+                        UpdateSettingsSection(updateState: appState.updateState, crashReportState: appState.crashReportState)
                     case .about:
                         AboutSettingsSection()
                     }
 
                 }
                 .padding(SeeleSpacing.lg)
+                .transaction { $0.animation = nil }
             }
             .background(SeeleColors.background)
         }
-        .focusedSceneValue(\.tabCommands, .cycling($selectedTab))
+        .focusedSceneValue(\.tabCommands, .cycling($selection))
     }
 
 }
 
+struct SettingsWindowView: View {
+    @State private var selection = SettingsTab.general
+
+    var body: some View {
+        SettingsView(selection: $selection)
+    }
+}
+
+#if DEBUG
 #Preview {
-    SettingsView()
+    @Previewable @State var selection = SettingsTab.general
+    SettingsView(selection: $selection)
         .environment(\.appState, AppState())
         .frame(width: 700, height: 500)
 }
+#endif
